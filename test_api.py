@@ -71,6 +71,64 @@ def test_acknowledge_alert():
         print(f"❌ エラー: {e}")
 
 
+def test_chat_message():
+    """チャットメッセージ送信テスト"""
+    print("\n🔍 チャットメッセージ送信...")
+    try:
+        payload = {
+            "message": "札幌のエントリ1工程が遅延しています。対応策を提案してください。",
+            "context": {
+                "location": "札幌",
+                "process": "エントリ1",
+                "delay_minutes": 20
+            }
+        }
+        response = requests.post("http://localhost:8000/api/v1/chat/message", json=payload)
+        if response.status_code == 200:
+            data = response.json()
+            print("✅ チャット応答を受信しました")
+            if data.get("suggestion"):
+                print(f"   提案ID: {data['suggestion']['id']}")
+                print(f"   配置変更数: {len(data['suggestion']['changes'])}")
+        else:
+            print(f"❌ エラー: {response.status_code}")
+    except Exception as e:
+        print(f"❌ エラー: {e}")
+
+
+def test_pending_approvals():
+    """承認待ち一覧取得テスト"""
+    print("\n🔍 承認待ち一覧取得...")
+    try:
+        response = requests.get("http://localhost:8000/api/v1/approvals")
+        if response.status_code == 200:
+            data = response.json()
+            print(f"✅ {data['total']}件の承認待ちを取得しました")
+            if data['approvals']:
+                print(f"   最初の提案ID: {data['approvals'][0]['id']}")
+        else:
+            print(f"❌ エラー: {response.status_code}")
+    except Exception as e:
+        print(f"❌ エラー: {e}")
+
+
+def test_system_status():
+    """システムステータス取得テスト"""
+    print("\n🔍 システムステータス取得...")
+    try:
+        response = requests.get("http://localhost:8000/api/v1/status")
+        if response.status_code == 200:
+            data = response.json()
+            print("✅ システムステータスを取得しました")
+            print(f"   アラート数: {len(data['alerts'])}")
+            print(f"   稼働率: {data['metrics']['availability']}%")
+            print(f"   処理済み案件: {data['metrics']['processed_cases']}件")
+        else:
+            print(f"❌ エラー: {response.status_code}")
+    except Exception as e:
+        print(f"❌ エラー: {e}")
+
+
 def main():
     print("=" * 60)
     print("🚀 AIMEE Backend API テスト")
@@ -84,9 +142,19 @@ def main():
         return
     
     # 各種APIテスト
+    print("\n=== アラート管理API ===")
     test_alerts_list()
     test_alert_detail()
     test_acknowledge_alert()
+    
+    print("\n=== チャットAPI ===")
+    test_chat_message()
+    
+    print("\n=== 承認管理API ===")
+    test_pending_approvals()
+    
+    print("\n=== ステータスAPI ===")
+    test_system_status()
     
     print("\n✅ すべてのテストが完了しました")
     print("\n📝 Swagger UI でAPIドキュメントを確認:")
