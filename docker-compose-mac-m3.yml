@@ -1,0 +1,122 @@
+version: '3.9'
+
+services:
+  # 軽量LLM専用コンテナ（M3最適化）
+  ollama-light:
+    image: ollama/ollama:latest
+    platform: linux/arm64/v8
+    ports:
+      - "11433:11434"
+    volumes:
+      - ollama-light-models:/root/.ollama
+    environment:
+      - OLLAMA_MODELS=qwen2:0.5b
+      - OLLAMA_NUM_PARALLEL=2  # M3用に調整
+      - OLLAMA_ACCELERATION=metal  # Apple Silicon最適化
+      - OLLAMA_MEMORY_LIMIT=3GB
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+    restart: unless-stopped
+
+  # メインLLM専用コンテナ（M3最適化）  
+  ollama-main:
+    image: ollama/ollama:latest
+    platform: linux/arm64/v8
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-main-models:/root/.ollama
+    environment:
+      - OLLAMA_MODELS=gemma3:4b-instruct
+      - OLLAMA_NUM_PARALLEL=1  # メモリ節約のため1に
+      - OLLAMA_ACCELERATION=metal
+      - OLLAMA_MEMORY_LIMIT=10GB
+      - OLLAMA_BATCH_SIZE=256  # バッチサイズを小さく
+    deploy:
+      resources:
+        limits:
+          memory: 10G
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.mac
+    platform: linux/arm64/v8
+    environment:
+      - DATABASE_URL=mysql://aimee_user:aimee_pass@mysql:3306/aimee_db
+      - REDIS_URL=redis://redis:6379/0
+      - OLLAMA_LIGHT_HOST=ollama-light
+      - OLLAMA_MAIN_HOST=ollama-main
+      - CHROMADB_HOST=chromadb
+    volumes:
+      - ./backend:/app
+    depends_on:
+      - mysql
+      - redis
+      - ollama-light
+      - ollama-main
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  mysql:
+    image: mysql:8.0
+    platform: linux/arm64/v8
+    ports:
+      - "3306:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=root_password
+      - MYSQL_DATABASE=aimee_db
+      - MYSQL_USER=aimee_user
+      - MYSQL_PASSWORD=aimee_pass
+    volumes:
+      - mysql-data:/var/lib/mysql
+    command: >
+      --innodb-buffer-pool-size=512M
+      --max-connections=100
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  chromadb:
+    image: chromadb/chroma:latest
+    platform: linux/arm64/v8
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma-data:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/chroma/chroma
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  redis:
+    image: redis:7-alpine
+    platform: linux/arm64/v8
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: >
+      redis-server 
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+volumes:
+  mysql-data:
+  chroma-data:
+  redis-data:
+  ollama-light-models:
+  ollama-main-models:
