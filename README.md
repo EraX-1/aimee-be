@@ -10,27 +10,31 @@ AIMEE（AI配置最適化システム）は、**軽量LLM** + **専門計算エ�
 
 ```mermaid
 graph TB
-    Query[👤 自然言語要求] --> LightLLM[🤖 軽量LLM<br/>qwen2:0.5b<br/>意図解析 0.2秒]
+    Query[自然言語要求] --> LightLLM[軽量LLM<br/>qwen2:0.5b<br/>意図解析 0.2秒]
     
-    LightLLM --> Parallel[📊 並列データ収集]
+    LightLLM --> Parallel[並列データ収集]
     
-    subgraph "並列専門エンジン（LLMなし 1-3秒）"
-        Parallel --> MySQL[📊 数値分析エンジン<br/>SQL集計・統計計算]
-        Parallel --> Rules[🧩 制約充足エンジン<br/>線形計画法・最適化]
-        Parallel --> Vector[🔍 ナレッジ検索エンジン<br/>ベクトル類似検索]
+    subgraph parallel [並列専門エンジン LLMなし 1-3秒]
+        Parallel --> MySQL[数値分析エンジン<br/>SQL集計・統計計算]
+        Parallel --> Rules[制約充足エンジン<br/>線形計画法・最適化]
+        Parallel --> Vector[ナレッジ検索エンジン<br/>ベクトル類似検索]
     end
     
-    MySQL --> MainLLM[🤖 メインLLM<br/>gemma3:4b-instruct<br/>統合判断 3-5秒]
+    MySQL --> MainLLM[メインLLM<br/>gemma3:4b-instruct<br/>統合判断 3-5秒]
     Rules --> MainLLM
     Vector --> MainLLM
     
-    MainLLM --> Response[🎯 最終回答]
+    MainLLM --> Response[最終回答]
     
-    subgraph "Docker最適化データ基盤"
-        MySQL --> AimeeDB[(🗃️ aimee_db<br/>14テーブル構造化データ)]
-        Vector --> ChromaDB[(🗄️ ChromaDB<br/>管理者ノウハウ)]
-        MainLLM --> Redis[(⚡ Redis<br/>高速キャッシュ)]
+    subgraph docker [Docker最適化データ基盤]
+        AimeeDB[(aimee_db<br/>14テーブル構造化データ)]
+        ChromaDB[(ChromaDB<br/>管理者ノウハウ)]
+        Redis[(Redis<br/>高速キャッシュ)]
     end
+    
+    MySQL -.-> AimeeDB
+    Vector -.-> ChromaDB
+    MainLLM -.-> Redis
     
     style LightLLM fill:#e1f5fe
     style MainLLM fill:#f9d71c
@@ -56,7 +60,7 @@ graph TB
 
 ```mermaid
 graph LR
-    subgraph "aimee_db（構造化データ）"
+    subgraph aimeedb [aimee_db 構造化データ]
         EMP[employees<br/>従業員マスタ]
         PROD[productivity_records<br/>生産性実績]
         ATTEND[attendance_records<br/>勤怠実績]
@@ -65,14 +69,14 @@ graph LR
         FORECAST[workload_forecasts<br/>業務量予測]
     end
     
-    subgraph "ChromaDB（非構造化ナレッジ）"
+    subgraph chromadb [ChromaDB 非構造化ナレッジ]
         RULES[配置ルール・制約条件]
         KNOWHOW[現場ノウハウ・経験則]
         CASES[成功事例・失敗パターン]
         CONTEXT[rag_context蓄積データ]
     end
     
-    subgraph "リアルタイム処理"
+    subgraph realtime [リアルタイム処理]
         MySQL[数値計算エンジン] --> Gemma3[統合判断AI]
         ChromaDB[ナレッジ検索] --> Gemma3
         Gemma3 --> Redis[結果キャッシュ]
@@ -87,32 +91,32 @@ graph LR
 
 ```mermaid
 graph TB
-    subgraph "Docker Compose Production Environment"
-        subgraph "Web層（Nginx最適化）"
-            Nginx[🌐 Nginx<br/>:80<br/>ロードバランサ・キャッシュ]
-            Frontend[⚛️ Management UI<br/>:3000<br/>React管理画面]
+    subgraph compose [Docker Compose Production Environment]
+        subgraph web [Web層 Nginx最適化]
+            Nginx[Nginx<br/>:80<br/>ロードバランサ・キャッシュ]
+            Frontend[Management UI<br/>:3000<br/>React管理画面]
         end
         
-        subgraph "API層（FastAPI最適化）"
-            Backend[🐍 FastAPI Backend<br/>:8000<br/>非同期処理・並列実行]
+        subgraph api [API層 FastAPI最適化]
+            Backend[FastAPI Backend<br/>:8000<br/>非同期処理・並列実行]
         end
         
-        subgraph "AI基盤層（GPU最適化）"
-            OllamaLight[🤖 Ollama Lightweight<br/>:11433<br/>qwen2:0.5b]
-            OllamaMain[🤖 Ollama Main<br/>:11434<br/>gemma3:4b-instruct]
-            ChromaDB[🗄️ ChromaDB<br/>:8001<br/>永続ベクトルストア]
+        subgraph ai [AI基盤層 GPU最適化]
+            OllamaLight[Ollama Lightweight<br/>:11433<br/>qwen2:0.5b]
+            OllamaMain[Ollama Main<br/>:11434<br/>gemma3:4b-instruct]
+            ChromaDB[ChromaDB<br/>:8001<br/>永続ベクトルストア]
         end
         
-        subgraph "データ層（SSD最適化）"
-            MySQL[🗃️ MySQL 8.0<br/>:3306<br/>aimee_db 14テーブル]
-            Redis[⚡ Redis Cluster<br/>:6379<br/>L1/L2キャッシュ]
+        subgraph data [データ層 SSD最適化]
+            MySQL[MySQL 8.0<br/>:3306<br/>aimee_db 14テーブル]
+            Redis[Redis Cluster<br/>:6379<br/>L1/L2キャッシュ]
         end
         
-        subgraph "永続化ボリューム（NVMe SSD）"
-            MySQLVol[💾 mysql-data]
-            ChromaVol[📊 chroma-vectors] 
-            OllamaVol[🤖 ollama-models]
-            RedisVol[⚡ redis-snapshots]
+        subgraph volume [永続化ボリューム NVMe SSD]
+            MySQLVol[mysql-data]
+            ChromaVol[chroma-vectors] 
+            OllamaVol[ollama-models]
+            RedisVol[redis-snapshots]
         end
     end
     
@@ -980,10 +984,6 @@ curl -X POST http://localhost:8000/api/v1/benchmark \
 - [ ] マルチテナント対応
 - [ ] API外部連携
 - [ ] モバイル対応
-
-## ライセンス
-
-MIT License
 
 ---
 
