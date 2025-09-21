@@ -1,0 +1,11 @@
+# 最小限の依存関係（M3 Mac対応）
+llama-cpp-python
+langchain
+langchain-community
+chromadb
+sentence-transformers
+python-dotenv
+pandas
+numpy
+tqdm
+psutil

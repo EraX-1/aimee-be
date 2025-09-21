@@ -1,0 +1,95 @@
+FROM python:3.11
+
+WORKDIR /app
+
+# llama-cpp-pythonのビルドに必要なパッケージ
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python依存関係のインストール
+RUN pip install --no-cache-dir \
+    llama-cpp-python \
+    langchain \
+    langchain-community \
+    chromadb \
+    sentence-transformers \
+    fastapi \
+    uvicorn \
+    pydantic
+
+# AIサービスのコードをコピー
+COPY experiments/llama_rag_test ./ai_service
+
+# AI用のFastAPIサーバー作成
+RUN echo 'from fastapi import FastAPI, HTTPException\n\
+from pydantic import BaseModel\n\
+from typing import List, Dict, Any\n\
+import os\n\
+from llama_cpp import Llama\n\
+\n\
+app = FastAPI(title="AIMEE AI Service")\n\
+\n\
+# グローバルでモデルを初期化\n\
+model_path = os.environ.get("MODEL_PATH", "/app/models/llama-2-7b-chat.Q4_K_M.gguf")\n\
+\n\
+try:\n\
+    llm = Llama(\n\
+        model_path=model_path,\n\
+        n_ctx=1024,\n\
+        n_threads=4,\n\
+        use_mmap=True,\n\
+    )\n\
+    print(f"✅ モデルロード完了: {model_path}")\n\
+except Exception as e:\n\
+    print(f"❌ モデルロードエラー: {e}")\n\
+    llm = None\n\
+\n\
+class ChatRequest(BaseModel):\n\
+    message: str\n\
+    max_tokens: int = 200\n\
+    temperature: float = 0.7\n\
+\n\
+class ChatResponse(BaseModel):\n\
+    response: str\n\
+    tokens_used: int\n\
+\n\
+@app.get("/health")\n\
+async def health_check():\n\
+    return {"status": "healthy", "model_loaded": llm is not None}\n\
+\n\
+@app.post("/chat", response_model=ChatResponse)\n\
+async def chat(request: ChatRequest):\n\
+    if not llm:\n\
+        raise HTTPException(status_code=503, detail="モデルが読み込まれていません")\n\
+    \n\
+    # 日本語回答を強制するプロンプト\n\
+    prompt = f"""<s>[INST] <<SYS>>\n\
+あなたは日本語で回答するAIアシスタントです。\n\
+必ず日本語で回答してください。\n\
+<</SYS>>\n\
+\n\
+{request.message} [/INST]\n\
+\n\
+日本語での回答："""\n\
+    \n\
+    try:\n\
+        result = llm(prompt, max_tokens=request.max_tokens, temperature=request.temperature)\n\
+        response_text = result["choices"][0]["text"].strip()\n\
+        tokens = result["usage"]["total_tokens"]\n\
+        \n\
+        return ChatResponse(response=response_text, tokens_used=tokens)\n\
+    except Exception as e:\n\
+        raise HTTPException(status_code=500, detail=str(e))\n\
+\n\
+if __name__ == "__main__":\n\
+    import uvicorn\n\
+    uvicorn.run(app, host="0.0.0.0", port=8001)\n' > /app/ai_server.py
+
+# ポート公開
+EXPOSE 8001
+
+# AIサーバー起動
+CMD ["python", "/app/ai_server.py"]

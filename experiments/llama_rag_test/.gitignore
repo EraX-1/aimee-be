@@ -1,0 +1,16 @@
+# 仮想環境
+venv/
+
+# モデルファイル（大きいので除外）
+models/
+
+# キャッシュ
+__pycache__/
+*.pyc
+
+# ベクトルDB
+vectorstore/
+*.db
+
+# ログファイル
+*.log
