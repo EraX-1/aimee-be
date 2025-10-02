@@ -1,63 +1,197 @@
-version: '3.8'
+version: '3.9'
 
 services:
-  # データベース
-  db:
+  # MySQL データベース（aimee-db統合）
+  mysql:
     image: mysql:8.0
-    environment:
-      MYSQL_ROOT_PASSWORD: rootpassword
-      MYSQL_DATABASE: aimee_db
-      MYSQL_USER: aimee
-      MYSQL_PASSWORD: aimeepassword
+    platform: linux/arm64/v8  # M3 Mac対応
     ports:
       - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: aimee_db
+      MYSQL_USER: aimee_user
+      MYSQL_PASSWORD: Aimee2024!
     volumes:
-      - db_data:/var/lib/mysql
+      - mysql-data:/var/lib/mysql
+      - ../aimee-db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+      - ../aimee-db/sample_data.sql:/docker-entrypoint-initdb.d/02-sample_data.sql
+      - ../aimee-db/insert_operators.sql:/docker-entrypoint-initdb.d/03-insert_operators.sql
+    command: >
+      --innodb-buffer-pool-size=512M
+      --max-connections=100
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  # 軽量LLM専用コンテナ（qwen2:0.5b）
+  ollama-light:
+    image: ollama/ollama:latest
+    platform: linux/arm64/v8
+    ports:
+      - "11433:11434"
+    volumes:
+      - ollama-light-models:/root/.ollama
+    environment:
+      - OLLAMA_NUM_PARALLEL=2
+      - OLLAMA_ACCELERATION=metal  # Apple Silicon最適化
+      - OLLAMA_MEMORY_LIMIT=3GB
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+    restart: unless-stopped
+
+  # メインLLM専用コンテナ（gemma2:9b）
+  ollama-main:
+    image: ollama/ollama:latest
+    platform: linux/arm64/v8
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-main-models:/root/.ollama
+    environment:
+      - OLLAMA_NUM_PARALLEL=1
+      - OLLAMA_ACCELERATION=metal
+      - OLLAMA_MEMORY_LIMIT=12GB
+      - OLLAMA_BATCH_SIZE=256
+      - OLLAMA_NUM_GPU_LAYERS=0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 12G
+    restart: unless-stopped
+
+  # ChromaDB（ベクトルデータベース）
+  chromadb:
+    image: chromadb/chroma:latest
+    platform: linux/arm64/v8
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma-data:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/chroma/chroma
+      - CHROMA_SERVER_AUTH_CREDENTIALS_PROVIDER=token
+      - CHROMA_SERVER_AUTH_CREDENTIALS=aimee-chroma-token
+      - CHROMA_SERVER_AUTH_TOKEN_TRANSPORT_HEADER=X-Chroma-Token
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v2/heartbeat"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    restart: unless-stopped
+
+  # Redis（キャッシュ）
+  redis:
+    image: redis:7-alpine
+    platform: linux/arm64/v8
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: >
+      redis-server 
+      --appendonly yes
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    restart: unless-stopped
 
   # API (FastAPI)
   api:
     build:
       context: .
       dockerfile: Dockerfile.api
+    platform: linux/arm64/v8
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: mysql+pymysql://aimee:aimeepassword@db:3306/aimee_db
-      AI_SERVICE_URL: http://ai:8001
+      # データベース設定
+      DATABASE_URL: mysql+aiomysql://aimee_user:Aimee2024!@mysql:3306/aimee_db
+      # Redis設定
+      REDIS_URL: redis://redis:6379/0
+      # LLM設定
+      OLLAMA_LIGHT_HOST: ollama-light
+      OLLAMA_LIGHT_PORT: 11434
+      OLLAMA_MAIN_HOST: ollama-main
+      OLLAMA_MAIN_PORT: 11434
+      # ChromaDB設定
+      CHROMADB_HOST: chromadb
+      CHROMADB_PORT: 8000
+      CHROMADB_AUTH_TOKEN: aimee-chroma-token
+      # アプリケーション設定
+      INTENT_MODEL: qwen2:0.5b
+      MAIN_MODEL: gemma2:9b
+      ENABLE_PARALLEL_PROCESSING: "true"
+      STREAMING_RESPONSE: "true"
+      # セキュリティ
+      SECRET_KEY: Ong4L4vAmW6EgSsQvVIYPfJZ3qzk1LEvFvVaJRVX3SvTRQD6kBOUrUC4u8kYtH86
+    env_file:
+      - .env
     depends_on:
-      db:
-        condition: service_healthy
-      ai:
-        condition: service_started
+      - mysql
+      - redis
+      - ollama-light
+      - ollama-main
+      - chromadb
     volumes:
       - ./app:/app/app
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-
-  # AI Service (Llama)
-  ai:
-    build:
-      context: .
-      dockerfile: Dockerfile.ai
-    ports:
-      - "8001:8001"
-    volumes:
-      - ./models:/app/models
-      - ./experiments/llama_rag_test:/app/ai_service
-    environment:
-      MODEL_PATH: /app/models/llama-2-7b-chat.Q4_K_M.gguf
-    # GPUを使用する場合（ローカルではコメントアウト）
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    restart: unless-stopped
 
 volumes:
-  db_data:
+  mysql-data:
+    driver: local
+  chroma-data:
+    driver: local
+  redis-data:
+    driver: local
+  ollama-light-models:
+    driver: local
+  ollama-main-models:
+    driver: local
+
+networks:
+  default:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

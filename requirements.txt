@@ -8,6 +8,8 @@ pydantic-settings==2.3.4
 # Database
 sqlalchemy==2.0.31
 mysql-connector-python==9.0.0
+pymysql==1.1.0
+aiomysql==0.2.0
 alembic==1.13.2
 
 # Redis for caching
