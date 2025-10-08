@@ -64,12 +64,12 @@ download-models:
 		docker-compose exec ollama-light ollama pull qwen2:0.5b; \
 		echo "✅ qwen2:0.5b のダウンロード完了"; \
 	fi
-	@if docker-compose exec ollama-main ollama list | grep -q "gemma2:9b"; then \
-		echo "✅ gemma2:9b は既にダウンロード済みです"; \
+	@if docker-compose exec ollama-main ollama list | grep -q "gemma3:4b"; then \
+		echo "✅ gemma3:4b は既にダウンロード済みです"; \
 	else \
-		echo "📥 gemma2:9b をダウンロード中..."; \
-		docker-compose exec ollama-main ollama pull gemma2:9b; \
-		echo "✅ gemma2:9b のダウンロード完了"; \
+		echo "📥 gemma3:4b をダウンロード中..."; \
+		docker-compose exec ollama-main ollama pull gemma3:4b; \
+		echo "✅ gemma3:4b のダウンロード完了"; \
 	fi
 	@echo "🎉 モデルの確認が完了しました！"
 

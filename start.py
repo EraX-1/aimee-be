@@ -23,17 +23,17 @@ def main():
     
     # サーバー起動
     print("🌐 FastAPIサーバーを起動します...")
-    print("📍 API: http://localhost:8000")
-    print("📖 ドキュメント: http://localhost:8000/docs")
+    print("📍 API: http://localhost:8002")
+    print("📖 ドキュメント: http://localhost:8002/docs")
     print("")
-    
+
     # Uvicornを起動
     subprocess.run([
-        sys.executable, "-m", "uvicorn", 
-        "app.main:app", 
-        "--reload", 
-        "--host", "0.0.0.0", 
-        "--port", "8000"
+        sys.executable, "-m", "uvicorn",
+        "app.main:app",
+        "--reload",
+        "--host", "0.0.0.0",
+        "--port", "8002"
     ])
 
 if __name__ == "__main__":

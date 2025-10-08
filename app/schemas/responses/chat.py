@@ -8,7 +8,8 @@ class AllocationChange(BaseModel):
     to_location: str = Field(..., alias="to", description="移動先拠点")
     process: str = Field(..., description="工程")
     count: int = Field(..., description="人数")
-    
+    operators: Optional[List[str]] = Field(default=None, description="対象オペレータ名リスト")
+
     class Config:
         populate_by_name = True
 

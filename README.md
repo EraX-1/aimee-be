@@ -10,21 +10,107 @@ AIMEE（AI配置最適化システム）は、自然言語による業務相談�
 
 ```mermaid
 graph TB
-    User[ユーザー] --> API[FastAPI<br/>8000番ポート]
-    
-    API --> ChatService[チャットサービス]
-    
-    ChatService --> IntegratedLLM[統合LLMサービス]
-    IntegratedLLM --> LightLLM[軽量LLM<br/>qwen2:0.5b<br/>意図解析]
-    IntegratedLLM --> MainLLM[メインLLM<br/>mock対応<br/>回答生成]
-    
-    ChatService --> DB[(MySQL<br/>aimee_db)]
-    ChatService --> Redis[(Redis<br/>キャッシュ)]
-    ChatService --> ChromaDB[(ChromaDB<br/>ベクトルDB)]
-    
-    style API fill:#f9d71c
-    style LightLLM fill:#e1f5fe
-    style MainLLM fill:#ff9800
+    subgraph "クライアント層"
+        User[ユーザー<br/>自然言語入力]
+    end
+
+    subgraph "API層 (FastAPI)"
+        API[FastAPI Server<br/>localhost:8002]
+        Endpoints[API Endpoints]
+        API --> Endpoints
+    end
+
+    subgraph "サービス層"
+        IntegratedLLM[IntegratedLLMService<br/>5段階処理統合]
+        OllamaService[OllamaService<br/>LLM通信]
+        ChromaService[ChromaService<br/>RAG検索]
+        DBService[DatabaseService<br/>DB照会]
+    end
+
+    subgraph "LLM層 (Ollama)"
+        LightLLM[ollama-light<br/>qwen2:0.5b<br/>ポート11433<br/>3GB RAM]
+        MainLLM[ollama-main<br/>gemma3:4b<br/>ポート11435<br/>12GB RAM]
+    end
+
+    subgraph "データ層"
+        MySQL[(MySQL 8.0<br/>aimee_db<br/>ポート3306)]
+        ChromaDB[(ChromaDB<br/>ベクトルDB<br/>ポート8002<br/>64ドキュメント)]
+        Redis[(Redis 7<br/>キャッシュ<br/>ポート6380)]
+    end
+
+    User -->|HTTPリクエスト| API
+    Endpoints --> IntegratedLLM
+
+    IntegratedLLM --> OllamaService
+    IntegratedLLM --> ChromaService
+    IntegratedLLM --> DBService
+
+    OllamaService -->|意図解析| LightLLM
+    OllamaService -->|応答生成| MainLLM
+
+    ChromaService -->|ベクトル検索| ChromaDB
+    DBService -->|SQL照会| MySQL
+    IntegratedLLM -.->|キャッシュ| Redis
+
+    style User fill:#e3f2fd
+    style API fill:#fff9c4
+    style IntegratedLLM fill:#c8e6c9
+    style LightLLM fill:#bbdefb
+    style MainLLM fill:#ffcc80
+    style MySQL fill:#f8bbd0
+    style ChromaDB fill:#d1c4e9
+    style Redis fill:#ffccbc
+```
+
+### 処理フロー詳細（5段階処理）
+
+```mermaid
+sequenceDiagram
+    participant User as ユーザー
+    participant API as FastAPI
+    participant Integrated as IntegratedLLMService
+    participant Light as ollama-light<br/>(qwen2:0.5b)
+    participant Chroma as ChromaDB
+    participant DB as MySQL
+    participant Main as ollama-main<br/>(gemma3:4b)
+
+    User->>API: POST /api/v1/llm-test/integrated<br/>「札幌のエントリ工程で人員不足」
+
+    rect rgb(220, 240, 255)
+        Note over Integrated,Light: ステップ1: 意図解析
+        API->>Integrated: process_message()
+        Integrated->>Light: analyze_intent()
+        Light-->>Integrated: intent_type: resource_allocation<br/>location: 札幌<br/>process: エントリ工程
+    end
+
+    rect rgb(255, 240, 220)
+        Note over Integrated,Chroma: ステップ2: RAG検索
+        Integrated->>Chroma: find_best_operators_for_process()
+        Chroma-->>Integrated: 推奨オペレータ5名<br/>スキルマッチスコア付き
+        Integrated->>Chroma: query_similar()
+        Chroma-->>Integrated: 関連コンテキスト3件
+    end
+
+    rect rgb(220, 255, 220)
+        Note over Integrated,DB: ステップ3: DB照会
+        Integrated->>DB: fetch_data_by_intent()
+        DB-->>Integrated: 配置情報、生産性データ<br/>余剰リソース、アラート
+    end
+
+    rect rgb(255, 220, 255)
+        Note over Integrated: ステップ4: 提案生成
+        Integrated->>Integrated: generate_suggestion()<br/>RAG結果 + DB情報を統合
+        Note right of Integrated: 配置変更案<br/>影響予測<br/>信頼度スコア
+    end
+
+    rect rgb(220, 255, 255)
+        Note over Integrated,Main: ステップ5: 応答生成
+        Integrated->>Main: generate_response()<br/>意図+DB+RAG+提案
+        Main-->>Integrated: 日本語応答<br/>「以下の対応策を提案します...」
+    end
+
+    Integrated-->>API: response + suggestion + metadata
+    API-->>User: JSON応答<br/>(推奨オペレータ含む)
 ```
 
 ## システムの特徴
@@ -32,7 +118,7 @@ graph TB
 ### 1. マルチモデルLLM構成
 
 - **軽量LLM（qwen2:0.5b）**: 高速な意図解析とルーティング
-- **メインLLM（gemma:7b）**: 高性能7Bパラメータモデルによる詳細分析と提案生成
+- **メインLLM（gemma3:4b）**: 軽量4Bパラメータモデルによる詳細分析と提案生成
 
 ### 2. リアルタイムデータ活用
 
@@ -40,21 +126,30 @@ graph TB
 - **Redis**: 高速キャッシュによるレスポンス改善
 - **ChromaDB**: ベクトルデータベースによる類似検索
 
-### 3. 実装済み統合LLMフロー
+### 3. 実装済み統合LLM + RAGフロー（5段階処理）
 
 1. **意図解析** (qwen2:0.5b) → ユーザーメッセージから意図とエンティティを抽出
-2. **データベース照会** → 意図に基づいて適切なデータを取得
-3. **提案生成** → リソース配分や遅延解決の具体的提案を作成
-4. **レスポンス生成** → 日本語で実用的な回答を作成
+2. **RAG検索** (ChromaDB) → セマンティック検索で最適なオペレータを検索
+3. **データベース照会** → 意図に基づいて適切なデータを取得
+4. **提案生成** → RAG結果とDB情報を統合して具体的提案を作成
+5. **レスポンス生成** (gemma3:4b) → 日本語で実用的な回答を作成
 
-### 4. 対応データベーステーブル
+### 4. ChromaDB RAGシステム（NEW）
+
+- **セマンティックチャンキング**: オペレータ・工程データを意味のある単位で分割
+- **ベクトル検索**: 自然言語クエリで最適なオペレータを検索
+- **スキルマッチング**: 業務・工程に応じた人員配置最適化
+
+### 5. 対応データベーステーブル
 
 - `locations`: 拠点情報
 - `processes`: 工程定義
 - `operators`: オペレータマスタ
+- `operator_process_capabilities`: オペレータ処理可能工程マトリクス
 - `operator_work_records`: 作業実績
 - `daily_assignments`: 日次配置計画
 - `login_records`: ログイン記録
+- `rag_context`: RAGコンテキスト（管理者判断基準）
 
 
 ## API仕様
@@ -196,7 +291,7 @@ make test-api       # API動作確認
 
 - **mysql**: MySQL 8.0データベース (ポート3306) 
 - **ollama-light**: 軽量LLM qwen2:0.5b (ポート11433)
-- **ollama-main**: メインLLM gemma:7b (ポート11434、12GB割当)
+- **ollama-main**: メインLLM gemma3:4b (ポート11435、12GB割当)
 - **chromadb**: ベクトルデータベース (ポート8001)
 - **redis**: キャッシュサーバー (ポート6379)
 - **FastAPI**: ローカルポート8002で実行中
@@ -208,7 +303,7 @@ make test-api       # API動作確認
 ```bash
 # LLMモデル設定
 INTENT_MODEL=qwen2:0.5b          # 意図解析用軽量モデル
-MAIN_MODEL=gemma:7b               # メイン回答生成モデル（7Bパラメータ高性能モデル）
+MAIN_MODEL=gemma3:4b             # メイン回答生成モデル（4Bパラメータ軽量モデル）
 
 # データベース設定
 DATABASE_URL=mysql+aiomysql://aimee_user:Aimee2024!@localhost:3306/aimee_db
@@ -217,7 +312,7 @@ DATABASE_URL=mysql+aiomysql://aimee_user:Aimee2024!@localhost:3306/aimee_db
 OLLAMA_LIGHT_HOST=localhost
 OLLAMA_LIGHT_PORT=11433
 OLLAMA_MAIN_HOST=localhost
-OLLAMA_MAIN_PORT=11434
+OLLAMA_MAIN_PORT=11435
 REDIS_URL=redis://redis:6379/0
 ```
 

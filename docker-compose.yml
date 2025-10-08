@@ -56,12 +56,12 @@ services:
           memory: 3G
     restart: unless-stopped
 
-  # メインLLM専用コンテナ（gemma2:9b）
+  # メインLLM専用コンテナ（gemma3:4b）
   ollama-main:
     image: ollama/ollama:latest
     platform: linux/arm64/v8
     ports:
-      - "11434:11434"
+      - "11435:11434"
     volumes:
       - ollama-main-models:/root/.ollama
     environment:
@@ -87,7 +87,7 @@ services:
     image: chromadb/chroma:latest
     platform: linux/arm64/v8
     ports:
-      - "8001:8000"
+      - "8003:8000"
     volumes:
       - chroma-data:/chroma/chroma
     environment:
@@ -96,11 +96,8 @@ services:
       - CHROMA_SERVER_AUTH_CREDENTIALS_PROVIDER=token
       - CHROMA_SERVER_AUTH_CREDENTIALS=aimee-chroma-token
       - CHROMA_SERVER_AUTH_TOKEN_TRANSPORT_HEADER=X-Chroma-Token
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v2/heartbeat"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+    # healthcheck disabled: コンテナにcurl/python3がないため
+    # ChromaDBは起動していればOK (ポート8003で外部から確認可能)
     deploy:
       resources:
         limits:
@@ -112,7 +109,7 @@ services:
     image: redis:7-alpine
     platform: linux/arm64/v8
     ports:
-      - "6379:6379"
+      - "6380:6379"
     volumes:
       - redis-data:/data
     command: >
@@ -138,10 +135,10 @@ services:
       dockerfile: Dockerfile.api
     platform: linux/arm64/v8
     ports:
-      - "8000:8000"
+      - "8002:8002"
     environment:
-      # データベース設定
-      DATABASE_URL: mysql+aiomysql://aimee_user:Aimee2024!@mysql:3306/aimee_db
+      # データベース設定 (ローカルMySQLを使用)
+      DATABASE_URL: mysql+aiomysql://aimee_user:Aimee2024!@host.docker.internal:3306/aimee_db
       # Redis設定
       REDIS_URL: redis://redis:6379/0
       # LLM設定
@@ -155,22 +152,25 @@ services:
       CHROMADB_AUTH_TOKEN: aimee-chroma-token
       # アプリケーション設定
       INTENT_MODEL: qwen2:0.5b
-      MAIN_MODEL: gemma2:9b
+      MAIN_MODEL: gemma3:4b
       ENABLE_PARALLEL_PROCESSING: "true"
       STREAMING_RESPONSE: "true"
       # セキュリティ
       SECRET_KEY: Ong4L4vAmW6EgSsQvVIYPfJZ3qzk1LEvFvVaJRVX3SvTRQD6kBOUrUC4u8kYtH86
     env_file:
       - .env
+    # env_fileの設定を環境変数でオーバーライド可能にする
+    extra_hosts:
+      # ローカルMySQLに接続するため
+      - "host.docker.internal:host-gateway"
     depends_on:
-      - mysql
       - redis
       - ollama-light
       - ollama-main
       - chromadb
     volumes:
       - ./app:/app/app
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
     deploy:
       resources:
         limits:

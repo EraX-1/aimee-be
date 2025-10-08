@@ -15,6 +15,9 @@ alembic==1.13.2
 # Redis for caching
 redis==5.0.7
 
+# ChromaDB for RAG
+chromadb==1.1.1
+
 # API utilities
 httpx==0.27.0
 python-multipart==0.0.9

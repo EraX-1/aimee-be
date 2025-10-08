@@ -70,47 +70,68 @@ def generate_suggestion(message: str, context: dict) -> Suggestion:
 async def send_chat_message(request: ChatMessageRequest):
     """
     ユーザーからのメッセージを受け取り、AI配置調整の提案を返します。
+    統合LLMサービスを使用して実際のAI処理を行います。
     """
     app_logger.info(f"Received chat message: {request.message}")
-    
-    # メッセージ分析（実際はNLP処理）
-    keywords = ["遅延", "不足", "配置", "調整", "対応", "提案"]
-    needs_suggestion = any(keyword in request.message for keyword in keywords)
-    
-    # 応答生成
-    response_text = f"""
+
+    from app.services.integrated_llm_service import IntegratedLLMService
+    from app.db.session import get_db
+
+    try:
+        # 統合LLMサービスでAI処理
+        llm_service = IntegratedLLMService()
+
+        # 非同期DB接続を取得
+        async for db in get_db():
+            result = await llm_service.process_message(
+                message=request.message,
+                context=request.context,
+                db=db,
+                detail=False
+            )
+
+            # 応答を整形
+            response_text = result.get("response", "応答を生成できませんでした")
+            suggestion_data = result.get("suggestion")
+
+            # 提案があれば変換
+            suggestion = None
+            if suggestion_data:
+                suggestion = Suggestion(
+                    id=suggestion_data.get("id", f"SGT{datetime.now().year}-{str(uuid.uuid4())[:8].upper()}"),
+                    changes=[AllocationChange(**c) for c in suggestion_data.get("changes", [])],
+                    impact=Impact(**suggestion_data.get("impact", {})),
+                    reason=suggestion_data.get("reason", ""),
+                    confidence_score=suggestion_data.get("confidence_score", 0.85)
+                )
+
+            return ChatResponse(
+                response=response_text,
+                suggestion=suggestion,
+                timestamp=datetime.now()
+            )
+
+    except Exception as e:
+        app_logger.error(f"Chat message processing error: {e}")
+
+        # エラー時はシンプルな応答を返す
+        response_text = f"""
 了解しました。「{request.message}」について分析します。
 
-📊 **現在の状況分析：**
-"""
-    
-    # コンテキストから状況を抽出
-    if request.context.get("location"):
-        response_text += f"- 拠点: {request.context['location']}\n"
-    if request.context.get("process"):
-        response_text += f"- 工程: {request.context['process']}\n"
-    if request.context.get("delay_minutes"):
-        response_text += f"- 遅延: {request.context['delay_minutes']}分\n"
-    
-    # ダミーデータで状況を補完
-    response_text += f"""- 現在配置: 12名
-- 処理残: 450件
-- 必要処理能力: 550件/時
+⚠️ 現在、AI処理システムが初期化中です。
+簡易モードで応答しています。
 
-🎯 **最適化提案：**
-以下の配置調整を提案します：
+📊 **メッセージ受信**: 確認しました
+🔄 **システム状態**: 起動処理中
+
+しばらくお待ちください。
 """
-    
-    # 提案生成
-    suggestion = None
-    if needs_suggestion:
-        suggestion = generate_suggestion(request.message, request.context)
-    
-    return ChatResponse(
-        response=response_text,
-        suggestion=suggestion,
-        timestamp=datetime.now()
-    )
+
+        return ChatResponse(
+            response=response_text,
+            suggestion=None,
+            timestamp=datetime.now()
+        )
 
 
 @router.get("/history", summary="チャット履歴取得")

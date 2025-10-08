@@ -52,119 +52,197 @@ class DatabaseService:
         return result
     
     async def _fetch_delay_resolution_data(
-        self, 
-        location: Optional[str], 
+        self,
+        location: Optional[str],
         process: Optional[str],
         db: AsyncSession
     ) -> Dict[str, Any]:
-        """遅延解決のためのデータ取得"""
+        """遅延解決のためのデータ取得 (login_records_by_locationから実データ取得)"""
         data = {}
-        
-        # 1. 現在の配置状況
-        if location:
-            current_assignment_query = text("""
-                SELECT 
-                    da.assignment_id,
-                    l.location_name,
-                    p.process_name,
-                    COUNT(da.operator_id) as allocated_count,
-                    5 as required_count,
-                    (5 - COUNT(da.operator_id)) as shortage,
-                    da.assignment_date
-                FROM daily_assignments da
-                JOIN locations l ON da.location_id = l.location_id
-                LEFT JOIN processes p ON da.business_id = p.business_id AND da.process_id = p.process_id
-                WHERE l.location_name LIKE :location
-                AND da.assignment_date = CURDATE()
-                GROUP BY da.assignment_id, l.location_name, p.process_name, da.assignment_date
-                ORDER BY shortage DESC
-            """)
-            
-            result = await db.execute(
-                current_assignment_query,
-                {"location": f"%{location}%"}
+
+        # 1. 最新のログイン状況から配置状況を取得
+        # 最新の1レコードのみを使用 (工程別にGROUP BY)
+        assignment_query = text("""
+            SELECT
+                business_name,
+                process_name,
+                sapporo as 札幌,
+                tokyo as 東京,
+                osaka as 大阪,
+                okinawa as 沖縄,
+                sasebo as 佐世保,
+                login_now,
+                login_today,
+                record_time
+            FROM login_records_by_location
+            WHERE business_name LIKE '%SS%'
+              AND record_time = (
+                  SELECT MAX(record_time) FROM login_records_by_location
+              )
+            ORDER BY process_name
+        """)
+
+        result = await db.execute(assignment_query)
+        rows = result.fetchall()
+
+        # データ整形
+        current_assignments = []
+        for row in rows:
+            row_dict = dict(row._mapping)
+            current_assignments.append({
+                "business_name": row_dict["business_name"],
+                "process_name": row_dict["process_name"],
+                "札幌": row_dict["札幌"],
+                "東京": row_dict["東京"],
+                "大阪": row_dict["大阪"],
+                "沖縄": row_dict["沖縄"],
+                "佐世保": row_dict["佐世保"],
+                "total_now": row_dict["login_now"],
+                "total_today": row_dict["login_today"]
+            })
+
+        data["current_assignments"] = current_assignments
+        app_logger.info(f"配置状況取得: {len(current_assignments)}件 (最新スナップショット)")
+
+        # 2. 実オペレータデータから余剰・不足を分析
+        # operator_process_capabilitiesから拠点×業務×工程別の人数を集計
+        actual_allocation_query = text("""
+            SELECT
+                l.location_name,
+                b.business_category,
+                b.business_name,
+                p.process_category,
+                p.process_name,
+                COUNT(DISTINCT o.operator_id) as operator_count
+            FROM
+                operators o
+                INNER JOIN operator_process_capabilities opc ON o.operator_id = opc.operator_id
+                INNER JOIN locations l ON o.location_id = l.location_id
+                INNER JOIN businesses b ON opc.business_id = b.business_id
+                INNER JOIN processes p ON opc.business_id = p.business_id AND opc.process_id = p.process_id
+            WHERE
+                o.is_valid = 1
+                AND b.business_category = 'SS'
+                AND b.business_name = '新SS(W)'
+            GROUP BY
+                l.location_name, b.business_category, b.business_name, p.process_category, p.process_name
+            ORDER BY
+                p.process_name, l.location_name
+        """)
+
+        result = await db.execute(actual_allocation_query)
+        actual_data = [dict(row._mapping) for row in result]
+
+        surplus_locations = []
+        shortage_locations = []
+
+        for row in actual_data:
+            loc_name = row["location_name"]
+            process_name = row["process_name"]
+            business_name = row["business_name"]
+            count = row["operator_count"]
+            category = row["business_category"]
+            ocr_type = row["process_category"]
+
+            # 3名以上なら余剰候補
+            if count >= 3:
+                surplus_locations.append({
+                    "location_name": loc_name,
+                    "process_name": process_name,
+                    "business_name": business_name,
+                    "business_category": category,
+                    "process_category": ocr_type,
+                    "current_count": count,
+                    "surplus": count - 2
+                })
+            # 1名なら不足候補
+            elif count == 1:
+                shortage_locations.append({
+                    "location_name": loc_name,
+                    "process_name": process_name,
+                    "business_name": business_name,
+                    "business_category": category,
+                    "process_category": ocr_type,
+                    "current_count": count,
+                    "shortage": 1
+                })
+
+        data["available_resources"] = surplus_locations
+        data["shortage_list"] = shortage_locations
+
+        app_logger.info(f"余剰候補: {len(surplus_locations)}件, 不足候補: {len(shortage_locations)}件")
+
+        # 余剰・不足の詳細ログ
+        app_logger.info(f"余剰TOP5: {[(s.get('location_name'), s.get('process_name'), s.get('surplus')) for s in surplus_locations[:5]]}")
+        app_logger.info(f"不足TOP5: {[(s.get('location_name'), s.get('process_name'), s.get('shortage')) for s in shortage_locations[:5]]}")
+
+        # 3. 各拠点・工程で利用可能なオペレータを取得 (4階層情報を含む)
+        operators_query = text("""
+            SELECT
+                o.operator_id,
+                o.operator_name,
+                l.location_name,
+                b.business_category,
+                b.business_name,
+                p.process_category,
+                p.process_name,
+                opc.work_level
+            FROM operators o
+            JOIN locations l ON o.location_id = l.location_id
+            LEFT JOIN operator_process_capabilities opc ON opc.operator_id = o.operator_id
+            LEFT JOIN businesses b ON b.business_id = opc.business_id
+            LEFT JOIN processes p ON p.business_id = opc.business_id AND p.process_id = opc.process_id
+            WHERE o.is_valid = 1
+              AND p.process_name IN ('エントリ1', 'エントリ2', '補正', 'SV補正', '目検')
+            ORDER BY l.location_name, b.business_category, b.business_name, p.process_category, p.process_name, o.operator_name
+        """)
+
+        result = await db.execute(operators_query)
+        operators_data = [dict(row._mapping) for row in result]
+
+        # 拠点×業務×OCR区分×工程別にオペレータをグルーピング (4階層対応)
+        operators_by_location_process = {}
+        for op in operators_data:
+            # 4階層をキーに含める
+            key = (
+                op.get("location_name"),
+                op.get("business_category"),
+                op.get("business_name"),
+                op.get("process_category"),
+                op.get("process_name")
             )
-            data["current_assignments"] = [dict(row._mapping) for row in result]
-            
-            # 特定の工程がある場合は絞り込み
-            if process and data["current_assignments"]:
-                data["target_process"] = [
-                    a for a in data["current_assignments"] 
-                    if process in a.get("process_name", "")
-                ]
+            if key not in operators_by_location_process:
+                operators_by_location_process[key] = []
+            operators_by_location_process[key].append(op)
+
+        # 後方互換性のため、(location, process)のキーも作成
+        operators_by_simple_key = {}
+        for op in operators_data:
+            simple_key = (op.get("location_name"), op.get("process_name"))
+            if simple_key not in operators_by_simple_key:
+                operators_by_simple_key[simple_key] = []
+            operators_by_simple_key[simple_key].append(op)
+
+        data["operators_by_location_process"] = operators_by_simple_key  # シンプルキー版
+        data["operators_by_hierarchy"] = operators_by_location_process  # 4階層キー版
+
+        app_logger.info(f"オペレータデータ取得: {len(operators_data)}件")
         
-        # 2. 過去7日間の作業実績トレンド
-        productivity_query = text("""
-            SELECT 
-                DATE(owr.record_date) as date,
-                l.location_name,
-                p.process_name,
-                AVG(owr.work_count) as avg_productivity,
-                COUNT(DISTINCT owr.operator_id) as employee_count
-            FROM operator_work_records owr
-            JOIN locations l ON owr.location_id = l.location_id
-            LEFT JOIN processes p ON owr.business_id = p.business_id AND owr.process_id = p.process_id
-            WHERE owr.record_date >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
-            AND (:location IS NULL OR l.location_name LIKE :location)
-            AND (:process IS NULL OR p.process_name LIKE :process)
-            GROUP BY DATE(owr.record_date), l.location_name, p.process_name
-            ORDER BY date DESC
-        """)
-        
-        result = await db.execute(
-            productivity_query,
-            {
-                "location": f"%{location}%" if location else None,
-                "process": f"%{process}%" if process else None
-            }
-        )
-        data["productivity_trends"] = [dict(row._mapping) for row in result]
-        
-        # 3. 他拠点のオペレータ状況
-        surplus_query = text("""
-            SELECT 
-                l.location_name,
-                p.process_name,
-                COUNT(DISTINCT da.operator_id) as allocated_count,
-                5 as required_count,
-                (COUNT(DISTINCT da.operator_id) - 5) as surplus,
-                GROUP_CONCAT(
-                    DISTINCT o.operator_name 
-                    SEPARATOR ', '
-                ) as available_employees
-            FROM daily_assignments da
-            JOIN locations l ON da.location_id = l.location_id
-            LEFT JOIN processes p ON da.business_id = p.business_id AND da.process_id = p.process_id
-            LEFT JOIN operators o ON da.operator_id = o.operator_id
-            WHERE da.assignment_date = CURDATE()
-            AND (:process IS NULL OR p.process_name LIKE :process)
-            GROUP BY l.location_id, p.process_id, l.location_name, p.process_name
-            HAVING surplus > 0
-            ORDER BY surplus DESC
-            LIMIT 10
-        """)
-        
-        result = await db.execute(
-            surplus_query,
-            {"process": f"%{process}%" if process else None}
-        )
-        data["available_resources"] = [dict(row._mapping) for row in result]
-        
-        # 4. ログイン記録（活動状況の確認）
+        # 4. 進捗スナップショット（活動状況の確認）
         if location:
-            login_query = text("""
-                SELECT 
-                    lr.business_name,
-                    lr.process_name,
-                    lr.login_count,
-                    lr.record_time
-                FROM login_records lr
-                WHERE lr.record_time >= DATE_FORMAT(DATE_SUB(NOW(), INTERVAL 24 HOUR), '%Y%m%d%H%i')
-                ORDER BY lr.record_time DESC
+            snapshot_query = text("""
+                SELECT
+                    snapshot_time,
+                    total_waiting,
+                    processing,
+                    entry_count,
+                    correction_waiting
+                FROM progress_snapshots
+                ORDER BY snapshot_id DESC
                 LIMIT 10
             """)
-            
-            result = await db.execute(login_query)
+
+            result = await db.execute(snapshot_query)
             data["recent_alerts"] = [dict(row._mapping) for row in result]
         
         return data
@@ -178,27 +256,25 @@ class DatabaseService:
         """リソース配分のためのデータ取得"""
         data = {}
         
-        # 1. 全体のリソース状況
+        # 1. 全体のリソース状況（daily_assignmentsテーブルなしバージョン）
         resource_overview_query = text("""
-            SELECT 
+            SELECT
                 l.location_name,
                 p.process_name,
                 COUNT(DISTINCT o.operator_id) as total_employees,
-                COUNT(DISTINCT da.operator_id) as present_count,
-                5 as required_count,
-                COUNT(DISTINCT da.operator_id) as allocated_count
+                COUNT(DISTINCT opc.operator_id) as capable_count,
+                5 as required_count
             FROM locations l
-            CROSS JOIN (SELECT DISTINCT business_id, process_id, process_name FROM processes) p
-            LEFT JOIN operators o ON o.location_id = l.location_id
-            LEFT JOIN operator_process_capabilities opc ON opc.operator_id = o.operator_id 
+            CROSS JOIN (SELECT DISTINCT business_id, process_id, process_name FROM processes LIMIT 10) p
+            LEFT JOIN operators o ON o.location_id = l.location_id AND o.is_valid = 1
+            LEFT JOIN operator_process_capabilities opc ON opc.operator_id = o.operator_id
                 AND opc.business_id = p.business_id AND opc.process_id = p.process_id
-            LEFT JOIN daily_assignments da ON da.location_id = l.location_id
-                AND da.business_id = p.business_id AND da.process_id = p.process_id
-                AND da.assignment_date = CURDATE()
             WHERE (:location IS NULL OR l.location_name LIKE :location)
             AND (:process IS NULL OR p.process_name LIKE :process)
             GROUP BY l.location_id, p.business_id, p.process_id, l.location_name, p.process_name
+            HAVING capable_count > 0
             ORDER BY l.location_name, p.process_name
+            LIMIT 20
         """)
         
         result = await db.execute(
@@ -251,26 +327,21 @@ class DatabaseService:
         """ステータス確認のためのデータ取得"""
         data = {}
         
-        # 現在の運用状況サマリー
+        # 現在の運用状況サマリー（daily_assignmentsテーブルなしバージョン）
         status_query = text("""
-            SELECT 
+            SELECT
                 l.location_name,
-                COUNT(DISTINCT p.process_id) as process_count,
+                l.region,
                 COUNT(DISTINCT o.operator_id) as total_employees,
-                COUNT(DISTINCT da.operator_id) as total_allocated,
-                COUNT(DISTINCT da.operator_id) * 5 as total_required,
-                AVG(owr.work_count) as avg_productivity,
-                COUNT(DISTINCT lr.login_id) as active_alerts
+                COUNT(DISTINCT opc.operator_id) as capable_operators,
+                AVG(owr.work_count) as avg_productivity
             FROM locations l
             LEFT JOIN operators o ON o.location_id = l.location_id AND o.is_valid = 1
-            LEFT JOIN daily_assignments da ON da.location_id = l.location_id
-                AND da.assignment_date = CURDATE()
+            LEFT JOIN operator_process_capabilities opc ON opc.operator_id = o.operator_id
             LEFT JOIN operator_work_records owr ON owr.operator_id = o.operator_id
-                AND owr.record_date = CURDATE()
-            LEFT JOIN login_records lr ON lr.record_time = DATE_FORMAT(NOW(), '%Y%m%d%H%i')
-            LEFT JOIN processes p ON da.business_id = p.business_id AND da.process_id = p.process_id
+                AND owr.record_date >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
             WHERE (:location IS NULL OR l.location_name LIKE :location)
-            GROUP BY l.location_id, l.location_name
+            GROUP BY l.location_id, l.location_name, l.region
             ORDER BY l.location_name
         """)
         

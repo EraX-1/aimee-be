@@ -71,7 +71,10 @@ class ApprovalListResponse(BaseModel):
     
 class ApprovalActionRequest(BaseModel):
     action: str = Field(..., description="承認アクション（approve/reject）")
+    user: Optional[str] = Field(None, description="ユーザー名")
+    user_id: Optional[str] = Field(None, description="ユーザーID")
     reason: Optional[str] = Field(None, description="理由")
+    notes: Optional[str] = Field(None, description="補足コメント")
     
     
 class ApprovalActionResponse(BaseModel):

@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     
     # Redis設定
     REDIS_URL: str = Field(default="redis://localhost:6379/0")
+    REDIS_EXTERNAL_PORT: int = Field(default=6380)
     REDIS_MAX_MEMORY: str = Field(default="512mb")
     REDIS_EVICTION_POLICY: str = Field(default="allkeys-lru")
     
@@ -51,6 +52,7 @@ class Settings(BaseSettings):
     # ChromaDB設定
     CHROMADB_HOST: str = Field(default="chromadb")
     CHROMADB_PORT: int = Field(default=8000)
+    CHROMADB_EXTERNAL_PORT: int = Field(default=8002)
     CHROMADB_AUTH_TOKEN: str = Field(default="aimee-chroma-token")
     CHROMADB_COLLECTION: str = Field(default="aimee_knowledge")
     

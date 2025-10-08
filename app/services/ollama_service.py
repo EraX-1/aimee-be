@@ -39,17 +39,23 @@ class OllamaService:
 
 メッセージ: {message}
 
-以下の形式で回答してください（JSONのみ、他の文章は不要）：
+以下の形式で回答してください（JSONのみ）：
 {{
-  "intent_type": "delay_resolution|resource_allocation|status_check|general_inquiry",
-  "urgency": "high|medium|low",
-  "requires_action": true|false,
+  "intent_type": "delay_resolution",
+  "urgency": "high",
+  "requires_action": true,
   "entities": {{
-    "location": "拠点名（あれば）",
-    "process": "工程名（あれば）",
-    "issue_type": "遅延|人員不足|品質問題|その他"
+    "location": "札幌",
+    "process": "エントリ1",
+    "issue_type": "人員不足"
   }}
-}}"""
+}}
+
+intent_typeは以下から1つだけ選択:
+- delay_resolution (遅延解消)
+- resource_allocation (人員配置)
+- status_check (状況確認)
+- general_inquiry (一般質問)"""
         
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -101,12 +107,13 @@ class OllamaService:
             }
     
     async def generate_response(
-        self, 
+        self,
         message: str,
         intent: Dict[str, Any],
         context: Optional[Dict[str, Any]] = None,
         db_data: Optional[Dict[str, Any]] = None,
-        suggestion: Optional[Dict[str, Any]] = None
+        suggestion: Optional[Dict[str, Any]] = None,
+        rag_results: Optional[Dict[str, Any]] = None
     ) -> str:
         """
         メインLLMで詳細な応答を生成
@@ -130,37 +137,47 @@ class OllamaService:
         # データベース情報のサマリー作成
         db_summary = self._create_db_summary(db_data) if db_data else ""
         suggestion_summary = self._create_suggestion_summary(suggestion) if suggestion else ""
+        rag_summary = self._create_rag_summary(rag_results) if rag_results else ""
         
         # 入力の抽象度判定
         is_abstract_input = self._is_abstract_input(message)
         
         if is_abstract_input:
             prompt = f"""入力「{message}」では情報不足です。以下を入力してください：
-- 拠点名（例：東京、大阪）
-- 工程名（例：梱包工程、検査工程）  
-- 問題内容（例：遅延30分、人員2名不足）
-- 緊急度（高・中・低）"""
+- 拠点名（例：札幌、東京、大阪）
+- 工程名（例：エントリ1、補正、SV補正）
+- 問題内容（例：遅延、人員不足）"""
         else:
-            prompt = f"""{location}の{process}で{issue_type}が発生しました。
+            # DBデータとシステム提案がある場合のみ詳細プロンプト
+            if db_summary and db_summary != "データベースに配置可能な人員情報なし":
+                prompt = f"""ユーザーからの依頼: {message}
 
-データベース取得情報:
+現在の配置状況:
 {db_summary}
 
-システム提案:
+システムの配置提案:
 {suggestion_summary}
 
-【絶対制約・実行指示】
-- データベースの余剰人員情報を必ず使用して配置提案を行う
-- 上記のデータベース情報に記載された実在する拠点・工程のみ使用
-- 架空の拠点名は一切使用禁止
-- データベースに余剰人員がある場合は必ず配置転換案を1つ提案する
-- 余剰人員がない場合のみ「配置困難」と回答する
+【重要】配置転換案を提示する際は、必ず以下の4階層を明示してください:
+1. 大分類 (SS / 非SS / あはき / 適用徴収)
+2. 業務タイプ (新SS(W) / 新SS(片道) など)
+3. OCR区分 (OCR対象 / OCR非対象 / 目検)
+4. 工程名 (エントリ1 / エントリ2 / 補正 / SV補正)
 
-必須回答形式: 
-最適提案: [余剰人員がある拠点名]の[工程名]から[余剰人数]名を[問題のある拠点]へ配置転換
+【回答フォーマット】
+「(大分類)」の「(業務タイプ)」の「(OCR区分)」の「(工程名)」において、
+[拠点名]から[オペレータ名]さんを[拠点名]へ配置転換することを提案します。
 
-実行理由: データベースの余剰人員データに基づく実現可能な配置変更
-最後に「配置承認」「配置否認」「さらに調整する」の選択を促す。"""
+例: 「SS」の「新SS(W)」の「OCR対象」の「エントリ1」において、品川から田中太郎さん、佐藤花子さんを札幌へ配置転換することを提案します。
+
+上記のデータに基づき、簡潔に配置転換案を提示してください。
+配置転換が不要な場合は「現在のリソースで対応可能です」とのみ回答してください。"""
+            else:
+                # データがない場合はシンプルに
+                prompt = f"""ユーザーからの依頼: {message}
+
+データベースに十分な配置情報がないため、詳細な提案はできません。
+「現在のリソースで対応可能です」と回答してください。"""
         
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -201,66 +218,109 @@ class OllamaService:
             return f"エラーが発生しました: {str(e)}"
     
     def _create_db_summary(self, db_data: Dict[str, Any]) -> str:
-        """データベース情報のサマリーを生成"""
+        """データベース情報のサマリーを生成 (4階層情報を含む)"""
         summary_parts = []
-        
-        # 人員不足の詳細
-        if db_data.get("current_assignments"):
-            assignments = db_data["current_assignments"]
-            for a in assignments:
-                shortage = a.get("shortage", 0)
-                if shortage > 0:
-                    summary_parts.append(
-                        f"- {a.get('location_name')}の{a.get('process_name')}で{shortage}名不足"
-                    )
-        
-        # 余剰人員の詳細
+
+        # オペレータデータから4階層情報を取得
+        operators_by_loc_proc = db_data.get("operators_by_location_process", {})
+
+        # 余剰人員の詳細 (4階層情報を含む)
         if db_data.get("available_resources"):
             resources = db_data["available_resources"]
-            for r in resources:
+            for r in resources[:10]:  # 上位10件
                 surplus = r.get("surplus", 0)
                 if surplus > 0:
+                    loc_name = r.get('location_name')
+                    proc_name = r.get('process_name')
+
+                    # オペレータ名を取得
+                    operators_list = operators_by_loc_proc.get((loc_name, proc_name), [])
+                    operator_names = [op.get('operator_name') for op in operators_list if op.get('operator_name')]
+
+                    # 4階層情報を取得 (最初のオペレータから)
+                    hierarchy = ""
+                    if operators_list:
+                        first_op = operators_list[0]
+                        cat = first_op.get('business_category', '')
+                        bus = first_op.get('business_name', '')
+                        ocr = first_op.get('process_category', '')
+                        if cat and bus and ocr:
+                            hierarchy = f" [{cat} > {bus} > {ocr}]"
+
+                    names_str = f" ({', '.join(operator_names[:3])}さん)" if operator_names else ""
                     summary_parts.append(
-                        f"- {r.get('location_name')}の{r.get('process_name')}で{surplus}名余剰"
+                        f"- {loc_name}の{proc_name}{hierarchy}: 現在{r.get('current_count')}名{names_str} (余剰{surplus}名)"
                     )
-                    employees = r.get("available_employees", "")
-                    if employees:
-                        summary_parts.append(f"  対象者: {employees}")
-        
-        # リソース概要
-        if db_data.get("resource_overview"):
-            overview = db_data["resource_overview"]
-            for o in overview[:5]:  # 上位5件のみ
-                location = o.get("location_name")
-                process = o.get("process_name")
-                allocated = o.get("allocated_count", 0)
-                required = o.get("required_count", 5)
-                if location and process:
-                    summary_parts.append(
-                        f"- {location}の{process}: 配置{allocated}名/必要{required}名"
-                    )
-        
+
+        # 不足人員の詳細 (4階層情報を含む)
+        if db_data.get("shortage_list"):
+            shortages = db_data["shortage_list"]
+            for s in shortages[:5]:
+                loc_name = s.get('location_name')
+                proc_name = s.get('process_name')
+
+                # オペレータ名を取得
+                operators_list = operators_by_loc_proc.get((loc_name, proc_name), [])
+                operator_names = [op.get('operator_name') for op in operators_list if op.get('operator_name')]
+
+                # 4階層情報を取得
+                hierarchy = ""
+                if operators_list:
+                    first_op = operators_list[0]
+                    cat = first_op.get('business_category', '')
+                    bus = first_op.get('business_name', '')
+                    ocr = first_op.get('process_category', '')
+                    if cat and bus and ocr:
+                        hierarchy = f" [{cat} > {bus} > {ocr}]"
+
+                names_str = f" ({', '.join(operator_names[:3])}さん)" if operator_names else ""
+                summary_parts.append(
+                    f"- {loc_name}の{proc_name}{hierarchy}: 現在{s.get('current_count')}名{names_str} (不足{s.get('shortage')}名)"
+                )
+
         return "\n".join(summary_parts) if summary_parts else "データベースに配置可能な人員情報なし"
     
     def _create_suggestion_summary(self, suggestion: Dict[str, Any]) -> str:
-        """提案内容のサマリーを生成"""
+        """提案内容のサマリーを生成 (オペレータ名を含む)"""
         if not suggestion or not suggestion.get("changes"):
-            return "システムによる配置変更提案なし（データベース情報を基に新規提案を生成してください）"
-        
+            return "なし"
+
         changes = suggestion["changes"]
         summary_parts = []
-        
-        for i, change in enumerate(changes, 1):
+
+        for change in changes:
             from_loc = change.get("from")
             to_loc = change.get("to")
             process = change.get("process")
             count = change.get("count", 0)
-            
+            operators = change.get("operators", [])
+
+            # オペレータ名を含める
+            if operators:
+                ops_str = "、".join([f"{name}さん" for name in operators])
+                summary_parts.append(
+                    f"{from_loc}の{process}から{ops_str} → {to_loc}へ{count}名"
+                )
+            else:
+                summary_parts.append(
+                    f"{from_loc}の{process} → {to_loc}へ{count}名"
+                )
+
+        return ", ".join(summary_parts)
+
+    def _create_rag_summary(self, rag_results: Dict[str, Any]) -> str:
+        """RAG検索結果のサマリーを生成"""
+        recommended_ops = rag_results.get("recommended_operators", [])
+        if not recommended_ops:
+            return "RAG検索結果: 該当するオペレータが見つかりませんでした"
+
+        summary_parts = ["RAG検索で以下のオペレータが適合しました:"]
+        for i, op in enumerate(recommended_ops[:5], 1):
             summary_parts.append(
-                f"{i}. {from_loc}の{process}から{to_loc}へ{count}名配置転換"
+                f"{i}. {op['operator_name']}({op['operator_id']}) - 拠点{op['location_id']} - 適合度{op['relevance_score']:.2f}"
             )
-        
-        return "\n".join(summary_parts) if summary_parts else "具体的な配置転換案を生成してください"
+
+        return "\n".join(summary_parts)
     
     def _is_abstract_input(self, message: str) -> bool:
         """入力の抽象度を判定"""

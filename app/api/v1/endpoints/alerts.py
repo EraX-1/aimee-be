@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Query, Path, HTTPException
+from fastapi import APIRouter, Query, Path, HTTPException, Depends
 from typing import Optional, List
 from datetime import datetime, timedelta
 import random
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.responses.alerts import (
     Alert,
@@ -11,6 +12,8 @@ from app.schemas.responses.alerts import (
     AlertPriority,
     AlertStatus,
 )
+from app.services.alert_service import AlertService
+from app.db.session import get_db
 from app.core.logging import app_logger
 
 router = APIRouter()
@@ -87,6 +90,32 @@ def generate_dummy_alerts() -> List[Alert]:
     return alerts
 
 
+@router.get("/check", summary="アラート基準チェック")
+async def check_alerts(
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    現在の状況をチェックして、基準を超えているアラートを生成します。
+
+    やばい基準:
+    - 補正工程残件数: 品川50件以上、大阪100件以上
+    - SS受領件数: 1,000件以上
+    - 長時間配置: 60分以上
+    - エントリバランス: 差30%以上
+    """
+    app_logger.info("アラート基準チェック開始")
+
+    alert_service = AlertService()
+    alerts = await alert_service.check_all_alerts(db)
+
+    return {
+        "message": "アラートチェック完了",
+        "alert_count": len(alerts),
+        "alerts": alerts,
+        "checked_at": datetime.now().isoformat()
+    }
+
+
 @router.get("", response_model=AlertListResponse, summary="アラート一覧取得")
 async def get_alerts(
     page: int = Query(1, ge=1, description="ページ番号"),
@@ -101,9 +130,9 @@ async def get_alerts(
     各種フィルタリングオプションを使用して、必要なアラートのみを絞り込むことができます。
     """
     app_logger.info(f"Getting alerts - page: {page}, page_size: {page_size}, filters: type={type}, priority={priority}, status={status}, location_id={location_id}")
-    
+
     all_alerts = generate_dummy_alerts()
-    
+
     # フィルタリング
     filtered_alerts = all_alerts
     if type:
@@ -114,13 +143,13 @@ async def get_alerts(
         filtered_alerts = [a for a in filtered_alerts if a.status == status]
     if location_id:
         filtered_alerts = [a for a in filtered_alerts if a.location_id == location_id]
-    
+
     # ページネーション
     total = len(filtered_alerts)
     start_idx = (page - 1) * page_size
     end_idx = start_idx + page_size
     paged_alerts = filtered_alerts[start_idx:end_idx]
-    
+
     return AlertListResponse(
         alerts=paged_alerts,
         total=total,
@@ -201,17 +230,49 @@ async def acknowledge_alert(
     指定されたアラートを確認済みとしてマークします。
     """
     app_logger.info(f"Acknowledging alert ID: {alert_id}")
-    
+
     all_alerts = generate_dummy_alerts()
-    
+
     # 該当アラートを検索
     alert_exists = any(a.id == alert_id for a in all_alerts)
-    
+
     if not alert_exists:
         raise HTTPException(status_code=404, detail="アラートが見つかりません")
-    
+
     return {
         "message": "アラートを確認しました",
         "alert_id": alert_id,
         "acknowledged_at": datetime.now().isoformat(),
     }
+
+
+@router.post("/{alert_id}/resolve", summary="アラート解消提案")
+async def resolve_alert(
+    alert_id: int = Path(..., ge=1, description="アラートID"),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    指定されたアラートをAIで解消する提案を生成します。
+
+    例: 「補正工程60件のアラートを解消して」→ 最適なオペレータ配置案を提案
+    """
+    app_logger.info(f"アラート解消提案生成: ID {alert_id}")
+
+    # まずアラートを生成してIDで検索
+    alert_service = AlertService()
+    all_alerts = await alert_service.check_all_alerts(db)
+
+    # 該当アラートを検索（IDではなくtypeで検索）
+    # 実際の実装ではDBに保存されたアラートを取得
+    if alert_id > len(all_alerts):
+        raise HTTPException(status_code=404, detail="アラートが見つかりません")
+
+    target_alert = all_alerts[min(alert_id - 1, len(all_alerts) - 1)] if all_alerts else None
+
+    if not target_alert:
+        raise HTTPException(status_code=404, detail="アラートが見つかりません")
+
+    # AIで解消提案を生成
+    resolution = await alert_service.resolve_alert_with_ai(target_alert, db)
+
+    return resolution

@@ -1,9 +1,12 @@
-from fastapi import APIRouter, HTTPException, Path
+from fastapi import APIRouter, HTTPException, Path, Depends
 from datetime import datetime, timedelta
 import uuid
+import json
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
 
 from app.schemas.responses.approvals import (
-    PendingApproval, 
+    PendingApproval,
     ApprovalListResponse,
     ApprovalActionRequest,
     ApprovalActionResponse,
@@ -13,11 +16,69 @@ from app.schemas.responses.approvals import (
 )
 from app.schemas.responses.chat import AllocationChange
 from app.core.logging import app_logger
+from app.db.session import get_db
 
 router = APIRouter()
 
 # メモリ内での承認管理（実際はデータベースを使用）
 pending_approvals_db = {}
+
+
+async def save_approval_history(
+    db: AsyncSession,
+    suggestion_id: str,
+    changes: list,
+    impact: dict,
+    action_type: str,
+    action_user: str,
+    action_user_id: str,
+    feedback_reason: str = "",
+    feedback_notes: str = "",
+    reason: str = "",
+    confidence_score: float = 0.0
+):
+    """承認履歴をDBに保存"""
+    try:
+        query = text("""
+        INSERT INTO approval_history (
+            suggestion_id,
+            suggestion_type,
+            changes,
+            impact,
+            reason,
+            confidence_score,
+            action_type,
+            action_user,
+            action_user_id,
+            feedback_reason,
+            feedback_notes,
+            execution_status
+        ) VALUES (:suggestion_id, :suggestion_type, :changes, :impact, :reason,
+                  :confidence_score, :action_type, :action_user, :action_user_id,
+                  :feedback_reason, :feedback_notes, :execution_status)
+        """)
+
+        await db.execute(query, {
+            "suggestion_id": suggestion_id,
+            "suggestion_type": "allocation_change",
+            "changes": json.dumps(changes, ensure_ascii=False),
+            "impact": json.dumps(impact, ensure_ascii=False),
+            "reason": reason,
+            "confidence_score": confidence_score,
+            "action_type": action_type,
+            "action_user": action_user,
+            "action_user_id": action_user_id,
+            "feedback_reason": feedback_reason,
+            "feedback_notes": feedback_notes,
+            "execution_status": "pending"
+        })
+        await db.commit()
+        app_logger.info(f"Approval history saved: {suggestion_id}")
+
+    except Exception as e:
+        app_logger.error(f"Failed to save approval history: {e}")
+        await db.rollback()
+        raise
 
 
 def generate_pending_approvals():
@@ -136,7 +197,8 @@ async def get_approval_detail(
 @router.post("/{approval_id}/action", response_model=ApprovalActionResponse, summary="承認アクション実行")
 async def execute_approval_action(
     approval_id: str = Path(..., description="承認ID"),
-    request: ApprovalActionRequest = ...
+    request: ApprovalActionRequest = ...,
+    db: AsyncSession = Depends(get_db)
 ):
     """
     配置変更提案に対して承認または却下を実行します。
@@ -164,13 +226,34 @@ async def execute_approval_action(
     if request.action == "approve":
         approval.status = ApprovalStatus.APPROVED
         message = "配置変更を承認しました"
+        action_type = "approved"
         # 実際の実装では配置変更の実行処理を行う
     elif request.action == "reject":
         approval.status = ApprovalStatus.REJECTED
         message = "配置変更を却下しました"
+        action_type = "rejected"
     else:
         raise HTTPException(status_code=400, detail="無効なアクションです")
-    
+
+    # 承認履歴をDBに保存
+    # TODO: DB保存は今後実装
+    # try:
+    #     await save_approval_history(
+    #         db=db,
+    #         suggestion_id=approval_id,
+    #         changes=[c.dict() for c in approval.changes],
+    #         impact=approval.impact.dict() if approval.impact else {},
+    #         action_type=action_type,
+    #         action_user=request.user or "system",
+    #         action_user_id=request.user_id or "system",
+    #         feedback_reason=request.reason or "",
+    #         feedback_notes=request.notes or ""
+    #     )
+    #     app_logger.info(f"承認履歴をDBに保存しました: {approval_id}")
+    # except Exception as e:
+    #     app_logger.error(f"承認履歴の保存に失敗しました: {e}")
+    #     # エラーでもAPIレスポンスは返す
+
     return ApprovalActionResponse(
         success=True,
         message=message,
