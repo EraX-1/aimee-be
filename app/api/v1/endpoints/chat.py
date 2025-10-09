@@ -105,6 +105,33 @@ async def send_chat_message(request: ChatMessageRequest):
                     confidence_score=suggestion_data.get("confidence_score", 0.85)
                 )
 
+                # 承認待ちリストに追加 (approvalsエンドポイントで使用)
+                from app.api.v1.endpoints.approvals import pending_approvals_db
+                from app.schemas.responses.approvals import PendingApproval, ApprovalImpact, UrgencyLevel, ApprovalStatus
+                from datetime import timedelta
+
+                # PendingApprovalオブジェクトとして作成
+                pending_approval = PendingApproval(
+                    id=suggestion.id,
+                    changes=[AllocationChange(**c) for c in suggestion_data.get("changes", [])],
+                    impact=ApprovalImpact(
+                        capacity=100,  # デフォルト値
+                        delay_risk="低",
+                        delay_change=suggestion_data.get("impact", {}).get("delay", "-15分"),
+                        quality=suggestion_data.get("impact", {}).get("quality", "維持")
+                    ),
+                    reason=suggestion_data.get("reason", ""),
+                    confidence_score=suggestion_data.get("confidence_score", 0.85),
+                    urgency=UrgencyLevel.HIGH,
+                    status=ApprovalStatus.PENDING,
+                    timestamp=datetime.now(),
+                    expires_at=datetime.now() + timedelta(hours=24),
+                    requested_by="AI Assistant"
+                )
+
+                pending_approvals_db[suggestion.id] = pending_approval
+                app_logger.info(f"Added to pending approvals: {suggestion.id}")
+
             return ChatResponse(
                 response=response_text,
                 suggestion=suggestion,

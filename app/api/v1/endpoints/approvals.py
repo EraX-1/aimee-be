@@ -161,16 +161,28 @@ async def get_pending_approvals(
     
     # フィルタリング
     approvals = list(pending_approvals_db.values())
-    
-    if status:
-        approvals = [a for a in approvals if a.status == status]
-    
-    if urgency:
-        approvals = [a for a in approvals if a.urgency == urgency]
-    
+
+    # dictとPendingApprovalオブジェクトの両方に対応
+    filtered_approvals = []
+    for a in approvals:
+        # dictの場合
+        if isinstance(a, dict):
+            if status and a.get("status") != status:
+                continue
+            if urgency and a.get("urgency") != urgency:
+                continue
+            filtered_approvals.append(a)
+        # PendingApprovalオブジェクトの場合
+        else:
+            if status and a.status != status:
+                continue
+            if urgency and a.urgency != urgency:
+                continue
+            filtered_approvals.append(a)
+
     return ApprovalListResponse(
-        approvals=approvals,
-        total=len(approvals)
+        approvals=filtered_approvals,
+        total=len(filtered_approvals)
     )
 
 
