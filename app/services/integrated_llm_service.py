@@ -250,6 +250,18 @@ class IntegratedLLMService:
         app_logger.info(f"余剰詳細: {[(r.get('location_name'), r.get('process_name'), r.get('surplus')) for r in available_resources[:5]]}")
         app_logger.info(f"不足詳細: {[(s.get('location_name'), s.get('process_name'), s.get('shortage')) for s in shortage_list[:5]]}")
 
+        # ユーザーが指定した拠点のみに絞り込む
+        user_specified_location = intent.get("entities", {}).get("location")
+        app_logger.info(f"【デバッグ】user_specified_location = '{user_specified_location}' (type: {type(user_specified_location)})")
+        app_logger.info(f"【デバッグ】フィルタリング前の不足リスト件数: {len(shortage_list)}")
+
+        if user_specified_location and user_specified_location != "不明":
+            original_count = len(shortage_list)
+            shortage_list = [s for s in shortage_list if s.get("location_name") == user_specified_location]
+            app_logger.info(f"ユーザー指定拠点でフィルタリング: {user_specified_location} → {original_count}件から{len(shortage_list)}件に絞り込み")
+        else:
+            app_logger.info(f"【デバッグ】フィルタリングスキップ (location={user_specified_location})")
+
         # 配置提案を構築
         changes = []
 

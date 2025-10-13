@@ -34,19 +34,21 @@ class OllamaService:
         Returns:
             意図解析結果
         """
-        prompt = f"""あなたはメッセージの意図を分析するアシスタントです。
-以下のメッセージを分析し、JSON形式で結果を返してください。
+        prompt = f"""メッセージから拠点名と工程名を抽出してください。
 
 メッセージ: {message}
 
-以下の形式で回答してください（JSONのみ）：
+拠点名の候補: 札幌, 品川, 佐世保, 本町東, 西梅田, 沖縄, 和歌山
+工程名の候補: エントリ1, エントリ2, 補正, SV補正, 目検
+
+JSON形式で回答（JSONのみ、説明不要）:
 {{
   "intent_type": "delay_resolution",
   "urgency": "high",
   "requires_action": true,
   "entities": {{
-    "location": "札幌",
-    "process": "エントリ1",
+    "location": "メッセージに含まれる拠点名",
+    "process": "メッセージに含まれる工程名",
     "issue_type": "人員不足"
   }}
 }}
@@ -67,7 +69,7 @@ intent_typeは以下から1つだけ選択:
                         "stream": False,
                         "options": {
                             "temperature": 0.1,
-                            "num_predict": 200,
+                            "num_predict": 512,
                             "top_k": 10,
                             "top_p": 0.9
                         }
@@ -84,7 +86,25 @@ intent_typeは以下から1つだけ選択:
             # JSON文字列をパース
             try:
                 parsed_intent = json.loads(llm_response)
-                app_logger.info(f"Parsed intent: {parsed_intent}")
+
+                # 正規表現で拠点名・工程名を再抽出（LLMが間違えるため）
+                locations = ['札幌', '品川', '佐世保', '本町東', '西梅田', '沖縄', '和歌山', '盛岡']
+                for loc in locations:
+                    if loc in message:
+                        parsed_intent['entities']['location'] = loc
+                        break
+
+                processes_map = {
+                    'エントリ1': 'エントリ1', 'エントリー1': 'エントリ1',
+                    'エントリ2': 'エントリ2', 'エントリー2': 'エントリ2',
+                    '補正': '補正', 'SV補正': 'SV補正', '目検': '目検'
+                }
+                for key, value in processes_map.items():
+                    if key in message:
+                        parsed_intent['entities']['process'] = value
+                        break
+
+                app_logger.info(f"Parsed intent (正規表現上書き後): {parsed_intent}")
                 return parsed_intent
             except json.JSONDecodeError:
                 app_logger.error(f"Failed to parse JSON from LLM response: {llm_response}")
@@ -188,8 +208,8 @@ intent_typeは以下から1つだけ選択:
                         "prompt": prompt,
                         "stream": False,
                         "options": {
-                            "temperature": 0.7,
-                            "num_predict": 200,
+                            "temperature": 0.3,
+                            "num_predict": 512,
                             "top_k": 20,
                             "top_p": 0.8
                         }
