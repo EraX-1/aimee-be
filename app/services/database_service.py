@@ -122,8 +122,8 @@ class DatabaseService:
                 INNER JOIN processes p ON opc.business_id = p.business_id AND opc.process_id = p.process_id
             WHERE
                 o.is_valid = 1
-                AND b.business_category = 'SS'
-                AND b.business_name = '新SS(W)'
+                AND b.business_category IN ('新SS', '新SS+')
+                AND b.business_name LIKE '%SS%'
             GROUP BY
                 l.location_name, b.business_category, b.business_name, p.process_category, p.process_name
             ORDER BY
@@ -166,6 +166,32 @@ class DatabaseService:
                     "current_count": count,
                     "shortage": 1
                 })
+
+        # ユーザーが特定の拠点+工程で「遅延」を報告した場合、強制的に不足候補に追加
+        if location and process:
+            user_specified_data = next(
+                (row for row in actual_data
+                 if row["location_name"] == location and row["process_name"] == process),
+                None
+            )
+
+            if user_specified_data:
+                already_in_shortage = any(
+                    s["location_name"] == location and s["process_name"] == process
+                    for s in shortage_locations
+                )
+
+                if not already_in_shortage:
+                    app_logger.info(f"ユーザー指定の遅延拠点を不足候補に追加: {location} - {process}")
+                    shortage_locations.append({
+                        "location_name": user_specified_data["location_name"],
+                        "process_name": user_specified_data["process_name"],
+                        "business_name": user_specified_data["business_name"],
+                        "business_category": user_specified_data["business_category"],
+                        "process_category": user_specified_data["process_category"],
+                        "current_count": user_specified_data["operator_count"],
+                        "shortage": 10  # 遅延対応として10名程度の増員を想定
+                    })
 
         data["available_resources"] = surplus_locations
         data["shortage_list"] = shortage_locations
