@@ -179,18 +179,25 @@ intent_typeは以下から1つだけ選択:
 {suggestion_summary}
 
 【重要】配置転換案を提示する際は、必ず以下の4階層を明示してください:
-1. 大分類 (SS / 非SS / あはき / 適用徴収)
-2. 業務タイプ (新SS(W) / 新SS(片道) など)
+1. 大分類 (新SS / 新SS+ / あはき / その他)
+2. 業務タイプ (新SS(W) / 新SS(U) など)
 3. OCR区分 (OCR対象 / OCR非対象 / 目検)
 4. 工程名 (エントリ1 / エントリ2 / 補正 / SV補正)
 
 【回答フォーマット】
 「(大分類)」の「(業務タイプ)」の「(OCR区分)」の「(工程名)」において、
-[拠点名]から[オペレータ名]さんを[拠点名]へ配置転換することを提案します。
+[元の拠点]から[配置先の拠点]へ[オペレータ名]を配置転換することを提案します。
 
-例: 「SS」の「新SS(W)」の「OCR対象」の「エントリ1」において、品川から田中太郎さん、佐藤花子さんを札幌へ配置転換することを提案します。
+【重要な注意】
+- システムの配置提案に記載されている通り、「[元の拠点]から[配置先の拠点]へ」の順番を厳守してください
+- オペレータ名は必ずシステムの配置提案に記載されている名前をそのまま使用してください
+- 存在しないオペレータ名や拠点名を作らないでください
 
-上記のデータに基づき、簡潔に配置転換案を提示してください。
+例: 「新SS」の「新SS(W)」の「OCR対象」の「エントリ1」において、以下の配置転換を提案します:
+1. 札幌から品川へ札幌テスト太郎1、札幌テスト太郎6を配置転換
+2. 西梅田から品川へ大阪テスト花子1、大阪テスト花子2を配置転換
+
+上記のシステムの配置提案に記載されているすべての提案を含めて、簡潔に配置転換案を提示してください。
 配置転換が不要な場合は「現在のリソースで対応可能です」とのみ回答してください。"""
             else:
                 # データがない場合はシンプルに
@@ -308,25 +315,25 @@ intent_typeは以下から1つだけ選択:
         changes = suggestion["changes"]
         summary_parts = []
 
-        for change in changes:
+        for idx, change in enumerate(changes, 1):
             from_loc = change.get("from")
             to_loc = change.get("to")
             process = change.get("process")
             count = change.get("count", 0)
             operators = change.get("operators", [])
 
-            # オペレータ名を含める
+            # オペレータ名を含める（より明確なフォーマット）
             if operators:
-                ops_str = "、".join([f"{name}さん" for name in operators])
+                ops_str = "、".join(operators)
                 summary_parts.append(
-                    f"{from_loc}の{process}から{ops_str} → {to_loc}へ{count}名"
+                    f"【提案{idx}】{from_loc}から{to_loc}へ {ops_str} ({count}名) を配置転換 (工程: {process})"
                 )
             else:
                 summary_parts.append(
-                    f"{from_loc}の{process} → {to_loc}へ{count}名"
+                    f"【提案{idx}】{from_loc}から{to_loc}へ {count}名を配置転換 (工程: {process})"
                 )
 
-        return ", ".join(summary_parts)
+        return "\n".join(summary_parts)
 
     def _create_rag_summary(self, rag_results: Dict[str, Any]) -> str:
         """RAG検索結果のサマリーを生成"""
