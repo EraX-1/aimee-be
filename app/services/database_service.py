@@ -42,13 +42,23 @@ class DatabaseService:
         # 意図タイプに応じたデータ取得
         if intent_type == "delay_resolution":
             result = await self._fetch_delay_resolution_data(location, process, db)
+        elif intent_type == "deadline_optimization":
+            result = await self._fetch_deadline_optimization_data(location, process, db)
+        elif intent_type == "completion_time_prediction":
+            result = await self._fetch_completion_prediction_data(location, process, db)
+        elif intent_type == "delay_risk_detection":
+            result = await self._fetch_delay_risk_data(location, process, db)
+        elif intent_type == "cross_business_transfer":
+            result = await self._fetch_cross_business_transfer_data(location, process, db)
+        elif intent_type == "process_optimization":
+            result = await self._fetch_process_optimization_data(location, process, db)
         elif intent_type == "resource_allocation":
             result = await self._fetch_resource_allocation_data(location, process, db)
         elif intent_type == "status_check":
             result = await self._fetch_status_data(location, process, db)
         else:
             result = await self._fetch_general_data(location, db)
-        
+
         return result
     
     async def _fetch_delay_resolution_data(
@@ -389,4 +399,175 @@ class DatabaseService:
         result = await db.execute(processes_query)
         data["processes"] = [dict(row._mapping) for row in result]
         
+        return data
+    async def _fetch_completion_prediction_data(
+        self,
+        location: Optional[str],
+        process: Optional[str],
+        db: AsyncSession
+    ) -> Dict[str, Any]:
+        """完了時刻予測用のデータを取得"""
+        data = {}
+
+        # progress_snapshotsから最新データを取得
+        query = text("""
+            SELECT
+                snapshot_time,
+                expected_completion_time,
+                total_waiting,
+                processing,
+                entry_count,
+                correction_waiting,
+                correction_processing,
+                sv_correction_waiting,
+                sv_correction_processing
+            FROM progress_snapshots
+            ORDER BY snapshot_id DESC
+            LIMIT 10
+        """)
+
+        result = await db.execute(query)
+        data["progress_snapshots"] = [dict(row._mapping) for row in result]
+
+        return data
+
+    async def _fetch_delay_risk_data(
+        self,
+        location: Optional[str],
+        process: Optional[str],
+        db: AsyncSession
+    ) -> Dict[str, Any]:
+        """遅延リスク検出用のデータを取得"""
+        return await self._fetch_completion_prediction_data(location, process, db)
+
+    async def _fetch_deadline_optimization_data(
+        self,
+        location: Optional[str],
+        process: Optional[str],
+        db: AsyncSession
+    ) -> Dict[str, Any]:
+        """納期最適化用のデータを取得"""
+        data = await self._fetch_delay_resolution_data(location, process, db)
+
+        # progress_snapshotsも追加
+        progress_data = await self._fetch_completion_prediction_data(location, process, db)
+        data.update(progress_data)
+
+        return data
+
+    async def _fetch_cross_business_transfer_data(
+        self,
+        location: Optional[str],
+        process: Optional[str],
+        db: AsyncSession
+    ) -> Dict[str, Any]:
+        """業務間移動（Q3）用のデータを取得"""
+        data = {}
+
+        # 1. 業務別の配置状況を取得
+        assignment_query = text("""
+            SELECT
+                business_name,
+                process_name,
+                sapporo as 札幌,
+                tokyo as 東京,
+                osaka as 大阪,
+                okinawa as 沖縄,
+                sasebo as 佐世保,
+                login_now,
+                login_today
+            FROM login_records_by_location
+            WHERE record_time = (
+                SELECT MAX(record_time) FROM login_records_by_location
+            )
+            ORDER BY business_name, process_name
+        """)
+
+        result = await db.execute(assignment_query)
+        data["business_assignments"] = [dict(row._mapping) for row in result]
+
+        # 2. オペレータのスキル情報を取得
+        skills_query = text("""
+            SELECT DISTINCT
+                o.operator_id,
+                o.name,
+                o.location,
+                opc.process_name,
+                opc.proficiency_level
+            FROM operators o
+            JOIN operator_process_capabilities opc ON o.operator_id = opc.operator_id
+            WHERE o.is_active = TRUE
+            ORDER BY o.location, opc.proficiency_level DESC
+            LIMIT 100
+        """)
+
+        result = await db.execute(skills_query)
+        data["operator_skills"] = [dict(row._mapping) for row in result]
+
+        # 3. 進捗スナップショット（受信時刻別タスク数）
+        progress_data = await self._fetch_completion_prediction_data(location, process, db)
+        data.update(progress_data)
+
+        return data
+
+    async def _fetch_process_optimization_data(
+        self,
+        location: Optional[str],
+        process: Optional[str],
+        db: AsyncSession
+    ) -> Dict[str, Any]:
+        """工程別最適化（Q5）用のデータを取得"""
+        data = {}
+
+        # 1. 工程別の進捗状況を取得
+        progress_query = text("""
+            SELECT
+                snapshot_time,
+                expected_completion_time,
+                total_waiting,
+                processing,
+                entry_count,
+                entry_processing,
+                correction_waiting,
+                correction_processing,
+                sv_correction_waiting,
+                sv_correction_processing
+            FROM progress_snapshots
+            ORDER BY snapshot_id DESC
+            LIMIT 10
+        """)
+
+        result = await db.execute(progress_query)
+        data["progress_snapshots"] = [dict(row._mapping) for row in result]
+
+        # 2. 工程別の現在の配置人数を取得
+        assignment_query = text("""
+            SELECT
+                business_name,
+                process_name,
+                sapporo + tokyo + osaka + okinawa + sasebo as total_assigned,
+                login_now
+            FROM login_records_by_location
+            WHERE record_time = (
+                SELECT MAX(record_time) FROM login_records_by_location
+            )
+            ORDER BY process_name
+        """)
+
+        result = await db.execute(assignment_query)
+        data["process_assignments"] = [dict(row._mapping) for row in result]
+
+        # 3. オペレータのスキル情報
+        skills_query = text("""
+            SELECT
+                process_name,
+                COUNT(DISTINCT operator_id) as available_operators
+            FROM operator_process_capabilities
+            GROUP BY process_name
+            ORDER BY process_name
+        """)
+
+        result = await db.execute(skills_query)
+        data["available_skills"] = [dict(row._mapping) for row in result]
+
         return data

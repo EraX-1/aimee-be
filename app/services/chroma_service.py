@@ -37,6 +37,9 @@ class ChromaService:
             chroma_host = settings.CHROMADB_HOST
             chroma_port = settings.CHROMADB_PORT  # コンテナ内ポート8000
 
+            # .envで設定されたポートを優先使用
+            app_logger.info(f"ChromaDB接続: {chroma_host}:{chroma_port}")
+
             ChromaService._client = chromadb.HttpClient(
                 host=chroma_host,
                 port=chroma_port
@@ -348,6 +351,43 @@ class ChromaService:
             })
 
         return operators
+
+    def search_manager_rules(
+        self,
+        query_text: str,
+        n_results: int = 3
+    ) -> List[Dict[str, Any]]:
+        """
+        管理者ノウハウ・判断基準を検索
+
+        Args:
+            query_text: 検索クエリ
+            n_results: 取得する結果数
+
+        Returns:
+            関連する管理者ルールのリスト
+        """
+        try:
+            results = self.collection.query(
+                query_texts=[query_text],
+                n_results=n_results
+            )
+
+            rules = []
+            for i, (doc, metadata) in enumerate(zip(results["documents"][0], results["metadatas"][0])):
+                rules.append({
+                    "rule_text": doc,
+                    "category": metadata.get("category", "general"),
+                    "title": metadata.get("title", ""),
+                    "relevance_score": 1 - results["distances"][0][i] if "distances" in results else 0.5
+                })
+
+            app_logger.info(f"管理者ルール検索: '{query_text[:30]}...' で {len(rules)}件取得")
+            return rules
+
+        except Exception as e:
+            app_logger.error(f"管理者ルール検索エラー: {e}")
+            return []
 
     def get_collection_stats(self) -> Dict[str, Any]:
         """コレクションの統計情報を取得"""

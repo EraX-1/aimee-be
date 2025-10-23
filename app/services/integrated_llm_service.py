@@ -81,19 +81,19 @@ class IntegratedLLMService:
                 process_id = entities.get("process_id")
                 location_id = entities.get("location")
 
-                # セマンティック検索でコンテキスト情報を取得
-                query_text = message
-                similar_docs = self._chroma_service.query_similar(
-                    query_text=query_text,
+                # 管理者ノウハウ・判断基準を検索
+                manager_rules = self._chroma_service.search_manager_rules(
+                    query_text=message,
                     n_results=3
                 )
-                rag_results["similar_context"] = similar_docs
-                app_logger.info(f"RAG検索完了: {len(similar_docs.get('documents', []))}件")
+                rag_results["manager_rules"] = manager_rules
+                app_logger.info(f"管理者ルール検索完了: {len(manager_rules)}件")
 
                 if detail:
                     debug_info["step2_rag_search"] = {
-                        "query_text": query_text,
-                        "similar_docs_count": len(similar_docs.get("documents", []))
+                        "query_text": message,
+                        "manager_rules_count": len(manager_rules),
+                        "manager_rules": [r.get("title") for r in manager_rules]
                     }
             else:
                 app_logger.info("ChromaDB未初期化のためRAG検索スキップ")
@@ -153,9 +153,24 @@ class IntegratedLLMService:
                         "executed_queries": executed_queries
                     }
 
-        # ステップ4: 提案生成（必要な場合）
+        # ステップ4: 提案生成（intent_typeに応じて処理）
         suggestion = None
-        if intent.get("requires_action") and (db_data or rag_results):
+        intent_type = intent.get("intent_type")
+
+        # completion_time_prediction と delay_risk_detection は提案不要
+        # impact_analysisは直前の提案を参照
+        if intent_type == "impact_analysis":
+            app_logger.info(f"Intent type 'impact_analysis' - 直前の提案を参照")
+            # contextから直前の提案を取得
+            last_suggestion = context.get("last_suggestion") if context else None
+            if last_suggestion:
+                suggestion = last_suggestion
+                app_logger.info(f"直前の提案を使用: {suggestion}")
+            else:
+                app_logger.warning("直前の提案が見つかりません")
+        elif intent_type in ["completion_time_prediction", "delay_risk_detection", "cross_business_transfer", "process_optimization"]:
+            app_logger.info(f"Intent type '{intent_type}' は提案生成をスキップ")
+        elif intent.get("requires_action") and (db_data or rag_results):
             suggestion = await self._generate_suggestion(intent, db_data, context, rag_results)
             if detail and suggestion:
                 debug_info["step4_suggestion_generation"] = {
@@ -196,13 +211,15 @@ class IntegratedLLMService:
             "suggestion": suggestion,
             "rag_results": {
                 "recommended_operators": rag_results.get("recommended_operators", []),
-                "context_relevance": len(rag_results.get("similar_context", {}).get("documents", []))
+                "manager_rules": rag_results.get("manager_rules", []),
+                "context_relevance": len(rag_results.get("manager_rules", []))
             },
             "metadata": {
                 "timestamp": datetime.now().isoformat(),
-                "data_sources": list(db_data.keys()) + ["rag_search"],
+                "data_sources": list(db_data.keys()) + ["rag_search", "manager_rules"],
                 "has_db_data": bool(db_data and not db_data.get("error")),
                 "has_rag_data": bool(rag_results),
+                "has_manager_rules": bool(rag_results.get("manager_rules")),
                 "response_type": response_type
             }
         }
@@ -223,12 +240,14 @@ class IntegratedLLMService:
         データベースの情報を基に具体的な提案を生成
         """
         intent_type = intent.get("intent_type")
-        
+
         if intent_type == "delay_resolution":
+            return await self._generate_delay_resolution_suggestion(intent, db_data, context)
+        elif intent_type == "deadline_optimization":
             return await self._generate_delay_resolution_suggestion(intent, db_data, context)
         elif intent_type == "resource_allocation":
             return await self._generate_resource_allocation_suggestion(intent, db_data, context)
-        
+
         return None
     
     async def _generate_delay_resolution_suggestion(
@@ -273,19 +292,50 @@ class IntegratedLLMService:
 
             app_logger.info(f"不足{i+1}: {shortage_loc}の{shortage_process} (不足{needed}名)")
 
-            # 同じ工程で余剰がある拠点を探す
+            # 同じ工程で余剰がある拠点を探す（業務間移動を優先、なければ同一業務も許可）
             matched_count = 0
+
+            # shortage側の4階層情報を取得
+            shortage_category = shortage.get("business_category", "SS")
+            shortage_business = shortage.get("business_name", "新SS(W)")
+            shortage_ocr = shortage.get("process_category", "OCR対象")
+
+            # フェーズ1: 業務間移動を探す（優先）
+            cross_business_resources = []
+            same_business_resources = []
+
             for j, resource in enumerate(available_resources):
+                resource_process = resource.get("process_name", "")
+                if resource_process == shortage_process:
+                    surplus = resource.get("surplus", 0)
+                    if surplus > 0:
+                        resource_category = resource.get("business_category", "SS")
+                        is_cross_business = (resource_category != shortage_category)
+
+                        if is_cross_business:
+                            cross_business_resources.append(resource)
+                            app_logger.info(f"  業務間余剰{len(cross_business_resources)}: {resource.get('location_name')}の{resource_process} ({resource_category} → {shortage_category}) 余剰{surplus}名")
+                        else:
+                            same_business_resources.append(resource)
+                            app_logger.info(f"  同一業務余剰{len(same_business_resources)}: {resource.get('location_name')}の{resource_process} ({resource_category}) 余剰{surplus}名")
+
+            # 優先順位: 業務間移動 → 同一業務内移動
+            priority_resources = cross_business_resources + same_business_resources
+            app_logger.info(f"  マッチング候補: 業務間{len(cross_business_resources)}件, 同一業務{len(same_business_resources)}件")
+
+            for j, resource in enumerate(priority_resources):
                 if len(changes) >= 3:  # 最大3件の変更
                     break
 
+                matched_count += 1
+                surplus = resource.get("surplus", 0)
                 resource_process = resource.get("process_name", "")
-                if resource_process == shortage_process:
-                    matched_count += 1
-                    surplus = resource.get("surplus", 0)
-                    app_logger.info(f"  余剰候補{j+1}: {resource.get('location_name')}の{resource_process} (余剰{surplus}名)")
+                resource_category = resource.get("business_category", "SS")
+                resource_business = resource.get("business_name", "新SS(W)")
+                resource_ocr = resource.get("process_category", "OCR対象")
+                is_cross_business = (resource_category != shortage_category)
 
-                    if surplus > 0:
+                if surplus > 0:  # 業務間・同一業務両方を許可（優先順位付き）
                         from_loc = resource.get("location_name")
                         # 同じ拠点への配置は除外
                         if from_loc != shortage_loc:
@@ -294,16 +344,6 @@ class IntegratedLLMService:
                             # この拠点・工程のオペレータを取得 (4階層対応)
                             # まず4階層キーで取得を試みる
                             operators_by_hierarchy = db_data.get("operators_by_hierarchy", {})
-
-                            # shortage側の4階層情報を取得
-                            shortage_category = shortage.get("business_category", "SS")
-                            shortage_business = shortage.get("business_name", "新SS(W)")
-                            shortage_ocr = shortage.get("process_category", "OCR対象")
-
-                            # resource側の4階層情報を取得
-                            resource_category = resource.get("business_category", "SS")
-                            resource_business = resource.get("business_name", "新SS(W)")
-                            resource_ocr = resource.get("process_category", "OCR対象")
 
                             # 4階層キーで検索
                             key_4layer = (from_loc, resource_category, resource_business, resource_ocr, shortage_process)

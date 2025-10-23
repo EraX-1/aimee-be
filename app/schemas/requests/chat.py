@@ -4,7 +4,8 @@ from pydantic import BaseModel, Field
 class ChatMessageRequest(BaseModel):
     message: str = Field(..., description="ユーザーからのメッセージ")
     context: dict = Field(default={}, description="追加のコンテキスト情報")
-    
+    session_id: str = Field(default="default", description="会話セッションID")
+
     class Config:
         json_schema_extra = {
             "example": {
@@ -13,6 +14,7 @@ class ChatMessageRequest(BaseModel):
                     "location": "札幌",
                     "process": "エントリ1",
                     "delay_minutes": 20
-                }
+                },
+                "session_id": "user123"
             }
         }

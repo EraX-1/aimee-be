@@ -72,12 +72,16 @@ async def send_chat_message(request: ChatMessageRequest):
     ユーザーからのメッセージを受け取り、AI配置調整の提案を返します。
     統合LLMサービスを使用して実際のAI処理を行います。
     """
-    app_logger.info(f"Received chat message: {request.message}")
+    app_logger.info(f"Received chat message: {request.message} (session: {request.session_id})")
 
     from app.services.integrated_llm_service import IntegratedLLMService
+    from app.services.conversation_store import conversation_store
     from app.db.session import get_db
 
     try:
+        # 会話履歴から直前の提案を取得
+        last_suggestion = conversation_store.get_last_suggestion(request.session_id)
+
         # 統合LLMサービスでAI処理
         llm_service = IntegratedLLMService()
 
@@ -85,7 +89,7 @@ async def send_chat_message(request: ChatMessageRequest):
         async for db in get_db():
             result = await llm_service.process_message(
                 message=request.message,
-                context=request.context,
+                context={**request.context, "last_suggestion": last_suggestion} if last_suggestion else request.context,
                 db=db,
                 detail=False
             )
@@ -132,11 +136,25 @@ async def send_chat_message(request: ChatMessageRequest):
                 pending_approvals_db[suggestion.id] = pending_approval
                 app_logger.info(f"Added to pending approvals: {suggestion.id}")
 
-            return ChatResponse(
+            # 会話履歴に保存
+            conversation_store.add_message(
+                session_id=request.session_id,
+                message=request.message,
                 response=response_text,
-                suggestion=suggestion,
-                timestamp=datetime.now()
+                suggestion=suggestion_data,
+                intent=result.get("intent")
             )
+            app_logger.info(f"Added to conversation history (session: {request.session_id})")
+
+            # 完全なレスポンスを返す (detail情報含む)
+            return {
+                "response": response_text,
+                "suggestion": suggestion.dict() if suggestion else None,
+                "intent": result.get("intent"),
+                "rag_results": result.get("rag_results"),
+                "metadata": result.get("metadata"),
+                "timestamp": datetime.now().isoformat()
+            }
 
     except Exception as e:
         app_logger.error(f"Chat message processing error: {e}")
