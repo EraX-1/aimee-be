@@ -50,12 +50,13 @@ async def save_approval_history(
             action_type,
             action_user,
             action_user_id,
+            action_timestamp,
             feedback_reason,
             feedback_notes,
             execution_status
         ) VALUES (:suggestion_id, :suggestion_type, :changes, :impact, :reason,
                   :confidence_score, :action_type, :action_user, :action_user_id,
-                  :feedback_reason, :feedback_notes, :execution_status)
+                  NOW(), :feedback_reason, :feedback_notes, :execution_status)
         """)
 
         await db.execute(query, {
@@ -248,23 +249,47 @@ async def execute_approval_action(
         raise HTTPException(status_code=400, detail="無効なアクションです")
 
     # 承認履歴をDBに保存
-    # TODO: DB保存は今後実装
-    # try:
-    #     await save_approval_history(
-    #         db=db,
-    #         suggestion_id=approval_id,
-    #         changes=[c.dict() for c in approval.changes],
-    #         impact=approval.impact.dict() if approval.impact else {},
-    #         action_type=action_type,
-    #         action_user=request.user or "system",
-    #         action_user_id=request.user_id or "system",
-    #         feedback_reason=request.reason or "",
-    #         feedback_notes=request.notes or ""
-    #     )
-    #     app_logger.info(f"承認履歴をDBに保存しました: {approval_id}")
-    # except Exception as e:
-    #     app_logger.error(f"承認履歴の保存に失敗しました: {e}")
-    #     # エラーでもAPIレスポンスは返す
+    try:
+        # Pydantic v2対応: model_dump()を使用
+        changes_list = []
+        for c in approval.changes:
+            if hasattr(c, 'model_dump'):
+                changes_list.append(c.model_dump())
+            elif hasattr(c, 'dict'):
+                changes_list.append(c.dict())
+            else:
+                changes_list.append(dict(c))
+
+        impact_dict = {}
+        if approval.impact:
+            if hasattr(approval.impact, 'model_dump'):
+                impact_dict = approval.impact.model_dump()
+            elif hasattr(approval.impact, 'dict'):
+                impact_dict = approval.impact.dict()
+            else:
+                impact_dict = dict(approval.impact)
+
+        # reasonとconfidence_scoreはPendingApprovalにないため、デフォルト値を使用
+        reason = getattr(approval, 'reason', "AI提案による配置変更")
+        confidence_score = getattr(approval, 'confidence_score', 0.85)
+
+        await save_approval_history(
+            db=db,
+            suggestion_id=approval_id,
+            changes=changes_list,
+            impact=impact_dict,
+            action_type=action_type,
+            action_user=request.user or "system",
+            action_user_id=request.user_id or "system",
+            feedback_reason=request.reason or "",
+            feedback_notes=request.notes or "",
+            reason=reason,
+            confidence_score=confidence_score
+        )
+        app_logger.info(f"承認履歴をDBに保存しました: {approval_id}")
+    except Exception as e:
+        app_logger.error(f"承認履歴の保存に失敗しました: {e}")
+        # エラーでもAPIレスポンスは返す（ユーザー体験を損なわない）
 
     return ApprovalActionResponse(
         success=True,

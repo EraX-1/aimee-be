@@ -32,30 +32,46 @@ class DatabaseService:
         """
         intent_type = intent.get("intent_type")
         entities = intent.get("entities", {})
+
+        # 4階層対応（後方互換性も維持）
         location = entities.get("location") or context.get("location")
-        process = entities.get("process") or context.get("process")
-        
-        app_logger.info(f"Fetching data for intent_type: {intent_type}, location: {location}, process: {process}")
+        business_category = entities.get("business_category") or entities.get("business") or context.get("business")
+        business_name = entities.get("business_name") or context.get("business_name")
+        process_category = entities.get("process_category") or context.get("process_category")
+        process_name = entities.get("process_name") or entities.get("process") or context.get("process")
+
+        app_logger.info(f"Fetching data for intent_type: {intent_type}, location: {location}, business: {business_category}/{business_name}, process: {process_name}")
         
         result = {}
         
         # 意図タイプに応じたデータ取得
+        # 4階層情報をresultに含める
+        result["entities_4layer"] = {
+            "location": location,
+            "business_category": business_category,
+            "business_name": business_name,
+            "process_category": process_category,
+            "process_name": process_name
+        }
+
         if intent_type == "delay_resolution":
-            result = await self._fetch_delay_resolution_data(location, process, db)
+            data = await self._fetch_delay_resolution_data(location, process_name, db)
+            result.update(data)
         elif intent_type == "deadline_optimization":
-            result = await self._fetch_deadline_optimization_data(location, process, db)
+            data = await self._fetch_deadline_optimization_data(location, process_name, db)
+            result.update(data)
         elif intent_type == "completion_time_prediction":
-            result = await self._fetch_completion_prediction_data(location, process, db)
+            result = await self._fetch_completion_prediction_data(location, process_name, db)
         elif intent_type == "delay_risk_detection":
-            result = await self._fetch_delay_risk_data(location, process, db)
+            result = await self._fetch_delay_risk_data(location, process_name, db)
         elif intent_type == "cross_business_transfer":
-            result = await self._fetch_cross_business_transfer_data(location, process, db)
+            result = await self._fetch_cross_business_transfer_data(location, process_name, db)
         elif intent_type == "process_optimization":
-            result = await self._fetch_process_optimization_data(location, process, db)
+            result = await self._fetch_process_optimization_data(location, process_name, db)
         elif intent_type == "resource_allocation":
-            result = await self._fetch_resource_allocation_data(location, process, db)
+            result = await self._fetch_resource_allocation_data(location, process_name, db)
         elif intent_type == "status_check":
-            result = await self._fetch_status_data(location, process, db)
+            result = await self._fetch_status_data(location, process_name, db)
         else:
             result = await self._fetch_general_data(location, db)
 
@@ -64,7 +80,7 @@ class DatabaseService:
     async def _fetch_delay_resolution_data(
         self,
         location: Optional[str],
-        process: Optional[str],
+        process_name: Optional[str],
         db: AsyncSession
     ) -> Dict[str, Any]:
         """遅延解決のためのデータ取得 (login_records_by_locationから実データ取得)"""
@@ -132,12 +148,11 @@ class DatabaseService:
                 INNER JOIN processes p ON opc.business_id = p.business_id AND opc.process_id = p.process_id
             WHERE
                 o.is_valid = 1
-                AND b.business_category = 'SS'
-                AND b.business_name = '新SS(W)'
+                -- 全業務カテゴリを取得（SS、非SS、あはき、適用徴収）
             GROUP BY
                 l.location_name, b.business_category, b.business_name, p.process_category, p.process_name
             ORDER BY
-                p.process_name, l.location_name
+                b.business_category, p.process_name, l.location_name
         """)
 
         result = await db.execute(actual_allocation_query)
@@ -237,7 +252,53 @@ class DatabaseService:
         data["operators_by_hierarchy"] = operators_by_location_process  # 4階層キー版
 
         app_logger.info(f"オペレータデータ取得: {len(operators_data)}件")
-        
+
+        # 3-2. スキルベースマッチング用: 不足工程のスキルを持つオペレータの現在配置を取得
+        # 「エントリ1が不足」→「エントリ1のスキルを持つ人が、今どの工程に配置されているか」
+        skill_matching_query = text("""
+            SELECT
+                o.operator_id,
+                o.operator_name,
+                l.location_name,
+                b_target.business_category as target_business_category,
+                b_target.business_name as target_business_name,
+                p_target.process_category as target_process_category,
+                p_target.process_name as target_process_name,
+                b_current.business_category as current_business_category,
+                b_current.business_name as current_business_name,
+                p_current.process_category as current_process_category,
+                p_current.process_name as current_process_name,
+                opc_target.work_level as target_skill_level
+            FROM operators o
+            JOIN locations l ON o.location_id = l.location_id
+            JOIN operator_process_capabilities opc_target ON o.operator_id = opc_target.operator_id
+            JOIN businesses b_target ON opc_target.business_id = b_target.business_id
+            JOIN processes p_target ON opc_target.business_id = p_target.business_id
+                AND opc_target.process_id = p_target.process_id
+            LEFT JOIN operator_process_capabilities opc_current ON o.operator_id = opc_current.operator_id
+            LEFT JOIN businesses b_current ON opc_current.business_id = b_current.business_id
+            LEFT JOIN processes p_current ON opc_current.business_id = p_current.business_id
+                AND opc_current.process_id = p_current.process_id
+            WHERE o.is_valid = 1
+              AND p_target.process_name IN ('エントリ1', 'エントリ2', '補正', 'SV補正', '目検')
+              AND opc_target.work_level >= 1
+            ORDER BY o.operator_id, p_target.process_name
+        """)
+
+        result = await db.execute(skill_matching_query)
+        skill_matching_data = [dict(row._mapping) for row in result]
+
+        # target_process (移動先候補工程) をキーにグルーピング
+        operators_by_target_skill = {}
+        for op in skill_matching_data:
+            target_process = op.get("target_process_name")
+            if target_process not in operators_by_target_skill:
+                operators_by_target_skill[target_process] = []
+            operators_by_target_skill[target_process].append(op)
+
+        data["operators_by_target_skill"] = operators_by_target_skill
+        app_logger.info(f"スキルベースマッチング: {len(skill_matching_data)}件のスキル保有データ")
+
         # 4. 進捗スナップショット（活動状況の確認）
         if location:
             snapshot_query = text("""
@@ -248,7 +309,8 @@ class DatabaseService:
                     entry_count,
                     correction_waiting
                 FROM progress_snapshots
-                ORDER BY snapshot_id DESC
+                WHERE total_waiting > 0
+                ORDER BY snapshot_time DESC
                 LIMIT 10
             """)
 
@@ -260,7 +322,7 @@ class DatabaseService:
     async def _fetch_resource_allocation_data(
         self,
         location: Optional[str],
-        process: Optional[str],
+        process_name: Optional[str],
         db: AsyncSession
     ) -> Dict[str, Any]:
         """リソース配分のためのデータ取得"""
@@ -331,7 +393,7 @@ class DatabaseService:
     async def _fetch_status_data(
         self,
         location: Optional[str],
-        process: Optional[str],
+        process_name: Optional[str],
         db: AsyncSession
     ) -> Dict[str, Any]:
         """ステータス確認のためのデータ取得"""
@@ -403,7 +465,7 @@ class DatabaseService:
     async def _fetch_completion_prediction_data(
         self,
         location: Optional[str],
-        process: Optional[str],
+        process_name: Optional[str],
         db: AsyncSession
     ) -> Dict[str, Any]:
         """完了時刻予測用のデータを取得"""
@@ -422,7 +484,8 @@ class DatabaseService:
                 sv_correction_waiting,
                 sv_correction_processing
             FROM progress_snapshots
-            ORDER BY snapshot_id DESC
+            WHERE total_waiting > 0
+                ORDER BY snapshot_time DESC
             LIMIT 10
         """)
 
@@ -434,23 +497,23 @@ class DatabaseService:
     async def _fetch_delay_risk_data(
         self,
         location: Optional[str],
-        process: Optional[str],
+        process_name: Optional[str],
         db: AsyncSession
     ) -> Dict[str, Any]:
         """遅延リスク検出用のデータを取得"""
-        return await self._fetch_completion_prediction_data(location, process, db)
+        return await self._fetch_completion_prediction_data(location, process_name, db)
 
     async def _fetch_deadline_optimization_data(
         self,
         location: Optional[str],
-        process: Optional[str],
+        process_name: Optional[str],
         db: AsyncSession
     ) -> Dict[str, Any]:
         """納期最適化用のデータを取得"""
-        data = await self._fetch_delay_resolution_data(location, process, db)
+        data = await self._fetch_delay_resolution_data(location, process_name, db)
 
         # progress_snapshotsも追加
-        progress_data = await self._fetch_completion_prediction_data(location, process, db)
+        progress_data = await self._fetch_completion_prediction_data(location, process_name, db)
         data.update(progress_data)
 
         return data
@@ -458,54 +521,16 @@ class DatabaseService:
     async def _fetch_cross_business_transfer_data(
         self,
         location: Optional[str],
-        process: Optional[str],
+        process_name: Optional[str],
         db: AsyncSession
     ) -> Dict[str, Any]:
         """業務間移動（Q3）用のデータを取得"""
-        data = {}
 
-        # 1. 業務別の配置状況を取得
-        assignment_query = text("""
-            SELECT
-                business_name,
-                process_name,
-                sapporo as 札幌,
-                tokyo as 東京,
-                osaka as 大阪,
-                okinawa as 沖縄,
-                sasebo as 佐世保,
-                login_now,
-                login_today
-            FROM login_records_by_location
-            WHERE record_time = (
-                SELECT MAX(record_time) FROM login_records_by_location
-            )
-            ORDER BY business_name, process_name
-        """)
+        # Q3では配置提案が必要なので、delay_resolution_dataを取得
+        data = await self._fetch_delay_resolution_data(location, process_name, db)
 
-        result = await db.execute(assignment_query)
-        data["business_assignments"] = [dict(row._mapping) for row in result]
-
-        # 2. オペレータのスキル情報を取得
-        skills_query = text("""
-            SELECT DISTINCT
-                o.operator_id,
-                o.name,
-                o.location,
-                opc.process_name,
-                opc.proficiency_level
-            FROM operators o
-            JOIN operator_process_capabilities opc ON o.operator_id = opc.operator_id
-            WHERE o.is_active = TRUE
-            ORDER BY o.location, opc.proficiency_level DESC
-            LIMIT 100
-        """)
-
-        result = await db.execute(skills_query)
-        data["operator_skills"] = [dict(row._mapping) for row in result]
-
-        # 3. 進捗スナップショット（受信時刻別タスク数）
-        progress_data = await self._fetch_completion_prediction_data(location, process, db)
+        # 進捗スナップショットも追加
+        progress_data = await self._fetch_completion_prediction_data(location, process_name, db)
         data.update(progress_data)
 
         return data
@@ -513,10 +538,27 @@ class DatabaseService:
     async def _fetch_process_optimization_data(
         self,
         location: Optional[str],
-        process: Optional[str],
+        process_name: Optional[str],
         db: AsyncSession
     ) -> Dict[str, Any]:
         """工程別最適化（Q5）用のデータを取得"""
+
+        # Q5でも配置提案が必要なので、delay_resolution_dataを取得
+        data = await self._fetch_delay_resolution_data(location, process_name, db)
+
+        # 進捗スナップショットも追加
+        progress_data = await self._fetch_completion_prediction_data(location, process_name, db)
+        data.update(progress_data)
+
+        return data
+
+    async def _fetch_process_optimization_data_old(
+        self,
+        location: Optional[str],
+        process_name: Optional[str],
+        db: AsyncSession
+    ) -> Dict[str, Any]:
+        """工程別最適化（Q5）用のデータを取得（旧バージョン、参考用）"""
         data = {}
 
         # 1. 工程別の進捗状況を取得
@@ -533,7 +575,8 @@ class DatabaseService:
                 sv_correction_waiting,
                 sv_correction_processing
             FROM progress_snapshots
-            ORDER BY snapshot_id DESC
+            WHERE total_waiting > 0
+                ORDER BY snapshot_time DESC
             LIMIT 10
         """)
 

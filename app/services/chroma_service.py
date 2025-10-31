@@ -355,7 +355,7 @@ class ChromaService:
     def search_manager_rules(
         self,
         query_text: str,
-        n_results: int = 3
+        n_results: int = 5
     ) -> List[Dict[str, Any]]:
         """
         管理者ノウハウ・判断基準を検索

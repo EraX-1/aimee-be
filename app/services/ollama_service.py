@@ -34,32 +34,113 @@ class OllamaService:
         Returns:
             意図解析結果
         """
-        prompt = f"""メッセージから意図を分析してください。
+        prompt = f"""メッセージから意図を分析し、必要な情報を抽出してJSON形式で回答してください。
 
 メッセージ: {message}
 
 JSON形式で回答（JSONのみ、説明不要）:
 {{
   "intent_type": "適切なタイプを選択",
-  "urgency": "high",
-  "requires_action": true,
+  "urgency": "high/medium/low",
+  "requires_action": true/false,
   "entities": {{
-    "location": "拠点名",
-    "process": "工程名",
-    "issue_type": "問題の種類"
+    "location": null,
+    "business_category": null,
+    "business_name": null,
+    "process_category": null,
+    "process_name": null,
+    "deadline_offset_minutes": null,
+    "target_people_count": null
   }}
 }}
 
 intent_typeは以下から最も適切なものを1つだけ選択:
-- deadline_optimization: 納期、処理完了時刻、20分前などの言及がある場合
-- completion_time_prediction: 「何時に終了」「いつ完了」などの時刻予測の質問
-- delay_risk_detection: 「遅延」「見込み」「リスク」などの検出要求
-- impact_analysis: 「影響」「大丈夫」などの影響分析要求
-- cross_business_transfer: 「非SSから」「業務間」などの業務間移動
+- deadline_optimization: 「配置したい」「最適配置」「人員配置」など配置変更を求める場合（XX分前の言及を含む）
+- completion_time_prediction: 「何時に終了」「何時に完了」など完了時刻のみを知りたい質問
+- delay_risk_detection: 「遅延が発生」「見込み」「リスク」などの検出要求
+- impact_analysis: 「影響」「大丈夫」など影響分析
+- cross_business_transfer: 「非SSから」「業務間移動」
 - process_optimization: 「各工程何人」などの工程別最適化
-- delay_resolution: 上記以外の遅延解消・人員不足対応
+- delay_resolution: 遅延解消・人員不足対応
 - status_check: 状況確認のみ
-- general_inquiry: 一般質問"""
+- general_inquiry: 一般質問
+
+【重要な区別】:
+- 「配置を教えて」「最適配置」 → deadline_optimization（配置変更を求めている）
+- 「何時に完了」「いつ終わる」 → completion_time_prediction（時刻のみ知りたい）
+
+entitiesの設定方法（4階層構造）:
+
+【重要】業務の4階層構造を正確に抽出してください:
+1. business_category: 業務大分類（SS、非SS、あはき、適用徴収のいずれか）
+2. business_name: 業務名（新SS(W)、新SS(片道)、非SS(W)、はり・きゅう など）
+3. process_category: OCR区分（OCR対象、OCR非対象、目検のいずれか）
+4. process_name: 工程名（エントリ1、エントリ2、補正、SV補正、目検）
+
+【その他の情報】:
+5. location: 拠点名（札幌、品川、佐世保、本町東、西梅田、沖縄、和歌山など）
+6. deadline_offset_minutes: 「XX分前」の数値のみ（例: '20分前' → 20）
+7. target_people_count: 「X人」の数値のみ（例: '3人' → 3）
+
+【抽出例】メッセージから正確に抽出してください:
+
+例1: 「SSの新SS(W)が納期...」
+  ✅ business_category: "SS"
+  ✅ business_name: "新SS(W)"
+  ❌ business_name: "SSの新SS(W)" ← これは間違い
+
+例2: 「札幌のSSの新SS(W)のOCR対象のエントリ1が...」
+  ✅ location: "札幌"
+  ✅ business_category: "SS"
+  ✅ business_name: "新SS(W)"
+  ✅ process_category: "OCR対象"
+  ✅ process_name: "エントリ1"
+
+例3: 「非SSから3人移動...」
+  ✅ business_category: "非SS"
+  ✅ business_name: null （具体的な業務名がない）
+  ✅ target_people_count: 3
+
+例4: 「非SSの非SS(W)から...」
+  ✅ business_category: "非SS"
+  ✅ business_name: "非SS(W)"
+  ❌ business_name: null ← これは間違い（非SS(W)と明記されている）
+
+例5: 「あはきのはり・きゅうの補正が...」
+  ✅ business_category: "あはき"
+  ✅ business_name: "はり・きゅう"
+  ✅ process_name: "補正"
+  ❌ business_category: "SS" ← これは間違い（「あはき」が正しい）
+  ❌ business_name: "あはき" ← これも間違い（あはきは業務大分類）
+
+例6: 「あはきを16:40頃までに...」
+  ✅ business_category: "あはき"
+  ✅ business_name: null （具体的な業務名がないため）
+  ❌ business_category: "SS" ← これは間違い
+  ❌ business_name: "あはき" ← これは間違い（あはきはcategoryであってnameではない）
+
+【業務大分類の一覧】（business_categoryは必ずこの4つから選択）:
+- SS（社会保険）
+- 非SS（非社会保険）
+- あはき（鍼灸・マッサージ）← これは業務大分類！
+- 適用徴収
+
+【重要な注意】:
+- 「あはき」は**business_category**です（business_nameではありません）
+- 「SS」「非SS」「適用徴収」も同様に**business_category**です
+
+【禁止事項】:
+- 「の」「が」などの助詞を含めない
+- 説明文を値にしない
+- **絶対に推測で値を入れない**（メッセージに明記されていない場合は必ずnull）
+- business_categoryは必ず上記4つから選択（それ以外は不可）
+
+【重要な注意】:
+メッセージを一字一句確認し、書かれていない情報は絶対にnullにしてください。
+例: 「SSの新SS(W)が納期...」には札幌もOCR対象も書かれていない
+→ location: null, process_category: null が正解
+→ location: "札幌" は間違い（推測している）
+"""
         
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -84,53 +165,42 @@ intent_typeは以下から最も適切なものを1つだけ選択:
             
             # レスポンスからJSON部分を抽出
             llm_response = result.get("response", "{}")
-            
+
+            # マークダウンコードブロックを削除（gemma2が```json```を返す場合がある）
+            llm_response = llm_response.strip()
+            if llm_response.startswith("```json"):
+                llm_response = llm_response[7:]  # ```json を削除
+            if llm_response.startswith("```"):
+                llm_response = llm_response[3:]  # ``` を削除
+            if llm_response.endswith("```"):
+                llm_response = llm_response[:-3]  # 末尾の ``` を削除
+            llm_response = llm_response.strip()
+
             # JSON文字列をパース
             try:
                 parsed_intent = json.loads(llm_response)
 
-                # キーワードベースでintent_typeを上書き（精度向上のため）
-                if any(kw in message for kw in ['何時に終了', '完了時刻', '終わる想定', '何時に完了']):
-                    parsed_intent['intent_type'] = 'completion_time_prediction'
-                elif any(kw in message for kw in ['遅延が発生', '遅延する見込み', 'リスク', '遅れ']):
-                    parsed_intent['intent_type'] = 'delay_risk_detection'
-                elif any(kw in message for kw in ['影響', '大丈夫', '移動元']):
+                # LLMの結果を信頼（キーワード判定は最小限に）
+                # 明らかな誤判定の場合のみ補正
+
+                # 影響分析を最優先で判定（配置変更ではない）
+                if any(kw in message for kw in ['影響はあり', '影響はない', '大丈夫ですか', '移動元', '配置転換元']):
+                    # 影響分析は確実に判定
                     parsed_intent['intent_type'] = 'impact_analysis'
-                elif any(kw in message for kw in ['非SSから', '業務間', '非SS']):
-                    parsed_intent['intent_type'] = 'cross_business_transfer'
-                elif any(kw in message for kw in ['各工程何人', '工程別', '工程ごと']):
-                    parsed_intent['intent_type'] = 'process_optimization'
-                elif any(kw in message for kw in ['納期', '20分前', '処理完了']):
+                    parsed_intent['requires_action'] = False  # 配置変更は求めていない
+                # 完了時刻予測（配置変更ではない）
+                elif '何時に終了' in message or '何時に完了' in message:
+                    # 配置を求めていない場合のみ
+                    if not any(kw in message for kw in ['配置したい', '最適配置', '配置を教え']):
+                        parsed_intent['intent_type'] = 'completion_time_prediction'
+                        parsed_intent['requires_action'] = False
+                # 配置変更リクエスト
+                elif any(kw in message for kw in ['配置したい', '最適配置', '配置を教え', '人員配置']):
+                    # 配置変更を求めている場合は必ずdeadline_optimization
                     parsed_intent['intent_type'] = 'deadline_optimization'
+                    parsed_intent['requires_action'] = True
 
-                # 正規表現で拠点名・工程名を再抽出（LLMが間違えるため）
-                locations = ['札幌', '品川', '佐世保', '本町東', '西梅田', '沖縄', '和歌山', '盛岡']
-                for loc in locations:
-                    if loc in message:
-                        parsed_intent['entities']['location'] = loc
-                        break
-
-                processes_map = {
-                    'エントリ1': 'エントリ1', 'エントリー1': 'エントリ1',
-                    'エントリ2': 'エントリ2', 'エントリー2': 'エントリ2',
-                    '補正': '補正', 'SV補正': 'SV補正', '目検': '目検'
-                }
-                for key, value in processes_map.items():
-                    if key in message:
-                        parsed_intent['entities']['process'] = value
-                        break
-
-                # 業務名を抽出
-                if 'SS' in message and '非SS' not in message:
-                    parsed_intent['entities']['business'] = 'SS'
-                elif '非SS' in message:
-                    parsed_intent['entities']['business'] = '非SS'
-                elif 'あはき' in message:
-                    parsed_intent['entities']['business'] = 'あはき'
-                elif '適徴' in message or '適用徴収' in message:
-                    parsed_intent['entities']['business'] = '適徴'
-
-                app_logger.info(f"Parsed intent (キーワード判定後): {parsed_intent}")
+                app_logger.info(f"Parsed intent (LLMベース、補正後): {parsed_intent}")
                 return parsed_intent
             except json.JSONDecodeError:
                 app_logger.error(f"Failed to parse JSON from LLM response: {llm_response}")
@@ -197,9 +267,9 @@ intent_typeは以下から最も適切なものを1つだけ選択:
         elif intent_type == "impact_analysis":
             return await self._generate_impact_analysis_response(message, db_data, suggestion, rag_results)
         elif intent_type == "cross_business_transfer":
-            return await self._generate_cross_business_transfer_response(message, db_data, rag_results)
+            return await self._generate_cross_business_transfer_response(message, db_data, suggestion, rag_results)
         elif intent_type == "process_optimization":
-            return await self._generate_process_optimization_response(message, db_data, rag_results)
+            return await self._generate_process_optimization_response(message, db_data, suggestion, rag_results)
         
         if is_abstract_input:
             prompt = f"""入力「{message}」では情報不足です。以下を入力してください：
@@ -255,10 +325,93 @@ intent_typeは以下から最も適切なものを1つだけ選択:
 - SSのエントリ1からSSのエントリ2へ移動 ← 同じ大分類内なのでNG
 
 上記の方針に基づき、業務階層のみを使って配置転換案を提示してください。
-配置転換が不要な場合は「現在のリソースで対応可能です」とのみ回答してください。"""
+
+【重要】配置転換提案の前置き:
+- 不足がある場合: 「○○工程で人員が不足しています。」
+- 不足がない場合: 「現在不足はありませんが、納期対応のため効率化を提案します。」
+
+配置転換が不要な場合のみ「現在のリソースで対応可能です」と回答してください。"""
             else:
-                # データがない場合はシンプルに
-                prompt = f"""ユーザーからの依頼: {message}
+                # 提案がない場合の詳細理由生成（完了時刻予測ロジックを流用）
+                if intent.get("intent_type") == "deadline_optimization" and db_data:
+                    snapshots = db_data.get("progress_snapshots", [])
+
+                    if snapshots and len(snapshots) > 0:
+                        latest = snapshots[0]
+                        total_waiting = latest.get("total_waiting", 0)
+                        snapshot_time_str = str(latest.get("snapshot_time", ""))
+                        expected_time_str = str(latest.get("expected_completion_time", ""))
+
+                        # 納期時刻を抽出（例: 202507281540 → 15:40）
+                        if len(expected_time_str) >= 12:
+                            deadline_hour = expected_time_str[8:10]
+                            deadline_minute = expected_time_str[10:12]
+                            deadline_time = f"{deadline_hour}:{deadline_minute}"
+                        else:
+                            deadline_time = "不明"
+
+                        # 現在時刻を抽出
+                        if len(snapshot_time_str) >= 12:
+                            current_hour = snapshot_time_str[8:10]
+                            current_minute = snapshot_time_str[10:12]
+                            current_time = f"{current_hour}:{current_minute}"
+
+                            # 残り時間を計算（分単位）
+                            current_total_min = int(current_hour) * 60 + int(current_minute)
+                            deadline_total_min = int(deadline_hour) * 60 + int(deadline_minute)
+                            remaining_minutes = deadline_total_min - current_total_min
+                        else:
+                            current_time = "不明"
+                            remaining_minutes = 0
+
+                        # 処理速度を計算
+                        if remaining_minutes > 0 and total_waiting > 0:
+                            required_speed = total_waiting / remaining_minutes  # 件/分
+                            # 現在の処理速度を推定（仮定：平均1.5件/分/人、平均5人稼働）
+                            estimated_current_speed = 7.5  # 件/分
+
+                            if required_speed <= estimated_current_speed:
+                                conclusion = "問題なく完了見込み"
+                            else:
+                                conclusion = f"要注意（必要速度: {required_speed:.1f}件/分）"
+                        else:
+                            required_speed = 0
+                            estimated_current_speed = 0
+                            conclusion = "余裕あり"
+
+                        prompt = f"""ユーザーからの依頼: {message}
+
+現在の状況（progress_snapshotsより）:
+- 現在時刻: {current_time}
+- 納期: {deadline_time}
+- 納期まで: あと{remaining_minutes}分
+- 残タスク数: {total_waiting}件
+- 必要処理速度: {required_speed:.1f}件/分
+- 現在の処理能力: 約{estimated_current_speed}件/分（推定）
+- 判定: {conclusion}
+
+上記の計算から、現在のリソースで納期内に処理完了が可能です。
+
+以下のフォーマットで必ず回答してください:
+
+✅ **現在のリソースで対応可能です**
+
+【分析結果】
+- 納期: {deadline_time}（あと{remaining_minutes}分）
+- 残タスク数: {total_waiting}件
+- 必要処理速度: {required_speed:.1f}件/分
+- 現在の処理能力: 約{estimated_current_speed}件/分
+- **結論**: このまま進めれば{remaining_minutes}分以内に完了見込みです
+
+追加の人員配置は不要と判断します。"""
+                    else:
+                        prompt = f"""ユーザーからの依頼: {message}
+
+データベースに十分な配置情報がないため、詳細な提案はできません。
+「現在のリソースで対応可能です」と回答してください。"""
+                else:
+                    # データがない場合はシンプルに
+                    prompt = f"""ユーザーからの依頼: {message}
 
 データベースに十分な配置情報がないため、詳細な提案はできません。
 「現在のリソースで対応可能です」と回答してください。"""
@@ -365,7 +518,7 @@ intent_typeは以下から最も適切なものを1つだけ選択:
         return "\n".join(summary_parts) if summary_parts else "データベースに配置可能な人員情報なし"
     
     def _create_suggestion_summary(self, suggestion: Dict[str, Any]) -> str:
-        """提案内容のサマリーを生成 (オペレータ名を含む)"""
+        """提案内容のサマリーを生成 (4階層形式、オペレータ名を含む)"""
         if not suggestion or not suggestion.get("changes"):
             return "なし"
 
@@ -373,24 +526,24 @@ intent_typeは以下から最も適切なものを1つだけ選択:
         summary_parts = []
 
         for change in changes:
-            from_loc = change.get("from")
-            to_loc = change.get("to")
-            process = change.get("process")
+            # 新構造: 4階層情報
+            from_info = f"「{change.get('from_business_category')}」の「{change.get('from_business_name')}」の「{change.get('from_process_category')}」の「{change.get('from_process_name')}」"
+            to_info = f"「{change.get('to_business_category')}」の「{change.get('to_business_name')}」の「{change.get('to_process_category')}」の「{change.get('to_process_name')}」"
             count = change.get("count", 0)
             operators = change.get("operators", [])
 
             # オペレータ名を含める
             if operators:
-                ops_str = "、".join([f"{name}さん" for name in operators])
+                ops_str = "、".join([f"{name}さん" for name in operators[:3]])
                 summary_parts.append(
-                    f"{from_loc}の{process}から{ops_str} → {to_loc}へ{count}名"
+                    f"{from_info}から{ops_str}を{to_info}へ{count}人移動"
                 )
             else:
                 summary_parts.append(
-                    f"{from_loc}の{process} → {to_loc}へ{count}名"
+                    f"{from_info}から{count}人を{to_info}へ移動"
                 )
 
-        return ", ".join(summary_parts)
+        return "\n- " + "\n- ".join(summary_parts)
 
     def _create_rag_summary(self, rag_results: Dict[str, Any]) -> str:
         """RAG検索結果のサマリーを生成 (管理者ルールを含む)"""
@@ -681,15 +834,17 @@ intent_typeは以下から最も適切なものを1つだけ選択:
                 response_parts = ["📊 配置転換元への影響分析\n"]
 
                 for change in changes:
-                    from_loc = change.get("from", "不明")
-                    to_loc = change.get("to", "不明")
-                    process = change.get("process", "不明")
+                    # 新構造: 4階層情報
+                    from_info = f"「{change.get('from_business_category')}」の「{change.get('from_business_name')}」の「{change.get('from_process_category')}」の「{change.get('from_process_name')}」"
+                    to_info = f"「{change.get('to_business_category')}」の「{change.get('to_business_name')}」の「{change.get('to_process_category')}」の「{change.get('to_process_name')}」"
                     count = change.get("count", 0)
+                    operators = change.get("operators", [])
+                    ops_str = "、".join([f"{name}さん" for name in operators[:3]]) if operators else f"{count}人"
 
                     response_parts.append(f"""
-【移動元: {from_loc}の{process}】
-- 移動人数: {count}人
-- 移動先: {to_loc}
+【移動元: {from_info}】
+- 移動人数: {count}人 ({ops_str})
+- 移動先: {to_info}
 - 影響予測: {count}人移動後も処理継続可能と推定
 - 推奨: 移動元の現在の配置人数を確認し、最低必要人数を下回らないか確認してください""")
 
@@ -729,10 +884,72 @@ intent_typeは以下から最も適切なものを1つだけ選択:
         self,
         message: str,
         db_data: Optional[Dict[str, Any]] = None,
+        suggestion: Optional[Dict[str, Any]] = None,
         rag_results: Optional[Dict[str, Any]] = None
     ) -> str:
-        """業務間移動（Q3）の応答を生成"""
-        # 業務別配置状況を取得
+        """業務間移動（Q3）の応答を生成（suggestionから直接生成）"""
+
+        # suggestionがある場合は、それを元に応答を生成
+        if suggestion and suggestion.get("changes"):
+            changes = suggestion["changes"]
+            total_people = sum(c.get('count', 0) for c in changes)
+
+            response_parts = [
+                "👥 業務間移動の提案（非SS → SS）",
+                "",
+                "【提案】",
+                f"SS業務の優先処理のため、非SS業務から **{total_people}人** の移動を推奨します。",
+                "",
+                "【具体的な配置転換案】"
+            ]
+
+            for i, change in enumerate(changes, 1):
+                from_cat = change.get('from_business_category')
+                from_biz = change.get('from_business_name')
+                from_ocr = change.get('from_process_category', '')
+                from_proc = change.get('from_process_name')
+
+                to_cat = change.get('to_business_category')
+                to_biz = change.get('to_business_name')
+                to_ocr = change.get('to_process_category', '')
+                to_proc = change.get('to_process_name')
+
+                count = change.get('count', 0)
+                operators = change.get('operators', [])
+
+                # 4階層で表示
+                from_text = f"「{from_cat}」の「{from_biz}」"
+                if from_ocr:
+                    from_text += f"の「{from_ocr}」"
+                from_text += f"の「{from_proc}」"
+
+                to_text = f"「{to_cat}」の「{to_biz}」"
+                if to_ocr:
+                    to_text += f"の「{to_ocr}」"
+                to_text += f"の「{to_proc}」"
+
+                response_parts.append(f"{i}. {from_text}から{count}人を")
+                response_parts.append(f"   {to_text}へ移動")
+
+                if operators:
+                    ops_text = "、".join([f"{name}さん" for name in operators])
+                    response_parts.append(f"   対象: {ops_text}")
+
+                response_parts.append("")
+
+            response_parts.extend([
+                "【理由】",
+                "- SS業務の優先度が高いため",
+                "- スキル保有者による業務間移動で効率化",
+                "",
+                "【注意事項】",
+                "- 移動元の業務への影響を確認してください",
+                "- SSスキルを持つオペレータを選定済みです"
+            ])
+
+            return "\n".join(response_parts)
+
+        # suggestionがない場合は従来の応答（後方互換性）
         business_assignments = db_data.get("business_assignments", []) if db_data else []
         operator_skills = db_data.get("operator_skills", []) if db_data else []
 
@@ -757,19 +974,9 @@ SS業務の16:40受信分を優先処理するため、非SS業務から **3～5
 - SS業務の16:40受信分は優先度が高いため
 - 一般的に3～5名の追加配置で納期内処理が可能です
 
-【業務階層構造】
-※ 配置転換は以下の4階層で指定されます：
-  1. 大分類 (SS / 非SS / あはき / 適用徴収)
-  2. 業務タイプ (新SS(W) / 新SS(片道) など)
-  3. OCR区分 (OCR対象 / OCR非対象 / 目検)
-  4. 工程名 (エントリ1 / エントリ2 / 補正 / SV補正)
-
 【注意事項】
 - 移動元の業務への影響を確認してください
-- SSスキルを持つオペレータを優先してください
-- 長時間配置制限（管理者ルール）に注意してください
-
-※ 詳細な配置状況データが不足しているため、一般的な推奨値を提示しています"""
+- SSスキルを持つオペレータを優先してください"""
             return response
 
         # 非SS業務の配置状況を集計
@@ -819,9 +1026,47 @@ SS業務の16:40受信分を優先処理するため、非SS業務から **3～5
         self,
         message: str,
         db_data: Optional[Dict[str, Any]] = None,
+        suggestion: Optional[Dict[str, Any]] = None,
         rag_results: Optional[Dict[str, Any]] = None
     ) -> str:
-        """工程別最適化（Q5）の応答を生成"""
+        """工程別最適化（Q5）の応答を生成（suggestionから直接生成）"""
+
+        # suggestionがある場合は、それを元に応答を生成
+        if suggestion and suggestion.get("changes"):
+            changes = suggestion["changes"]
+
+            response_parts = [
+                "📊 工程別最適配置の提案",
+                "",
+                "【配置変更案】"
+            ]
+
+            for i, change in enumerate(changes, 1):
+                from_text = f"「{change.get('from_business_category')}」の「{change.get('from_business_name')}」の「{change.get('from_process_name')}」"
+                to_text = f"「{change.get('to_business_category')}」の「{change.get('to_business_name')}」の「{change.get('to_process_name')}」"
+
+                response_parts.append(f"{i}. {from_text}から{change.get('count')}人を")
+                response_parts.append(f"   {to_text}へ移動")
+
+                if change.get('operators'):
+                    ops_text = "、".join([f"{name}さん" for name in change.get('operators')])
+                    response_parts.append(f"   対象: {ops_text}")
+
+                response_parts.append("")
+
+            response_parts.extend([
+                "【理由】",
+                "- 各工程の処理速度と必要人数を最適化",
+                "- スキル保有者を適切に配置",
+                "",
+                "【注意事項】",
+                "- 各工程の処理速度は過去実績から推定した値です",
+                "- 実際の業務状況に応じて調整してください"
+            ])
+
+            return "\n".join(response_parts)
+
+        # suggestionがない場合の処理
         # 進捗データと配置データを取得
         progress_snapshots = db_data.get("progress_snapshots", []) if db_data else []
         process_assignments = db_data.get("process_assignments", []) if db_data else []
@@ -852,18 +1097,9 @@ SS業務の16:40受信分を優先処理するため、非SS業務から **3～5
 - 補正工程はエントリの約30%が流入
 - SV補正はさらに絞り込まれた案件のみ
 
-【業務階層構造】
-※ 配置転換は以下の4階層で指定されます：
-  1. 大分類 (SS / 非SS / あはき / 適用徴収)
-  2. 業務タイプ (新SS(W) / 新SS(片道) など)
-  3. OCR区分 (OCR対象 / OCR非対象 / 目検)
-  4. 工程名 (エントリ1 / エントリ2 / 補正 / SV補正)
-
 【注意事項】
-※ 実際の依存率はクライアント確認が必要です
-※ 処理速度は過去実績から推定した仮定値です
-※ 納期までの残り時間を2時間と仮定しています
-※ 詳細な進捗データが不足しているため、一般的な推奨値を提示しています"""
+- 各工程の処理速度は過去実績から推定した値です
+- 実際の業務状況に応じて調整してください"""
             return response
 
         # 最新の進捗データを取得

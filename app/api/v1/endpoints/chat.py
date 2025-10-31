@@ -91,7 +91,7 @@ async def send_chat_message(request: ChatMessageRequest):
                 message=request.message,
                 context={**request.context, "last_suggestion": last_suggestion} if last_suggestion else request.context,
                 db=db,
-                detail=False
+                detail=request.debug  # デバッグモードの場合は詳細情報を収集
             )
 
             # 応答を整形
@@ -146,6 +146,12 @@ async def send_chat_message(request: ChatMessageRequest):
             )
             app_logger.info(f"Added to conversation history (session: {request.session_id})")
 
+            # デバッグ情報の整形
+            debug_info = None
+            if request.debug and result.get("debug_info"):
+                from app.schemas.responses.chat import DebugInfo
+                debug_info = DebugInfo(**result.get("debug_info"))
+
             # 完全なレスポンスを返す (detail情報含む)
             return {
                 "response": response_text,
@@ -153,7 +159,8 @@ async def send_chat_message(request: ChatMessageRequest):
                 "intent": result.get("intent"),
                 "rag_results": result.get("rag_results"),
                 "metadata": result.get("metadata"),
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
+                "debug_info": debug_info.dict() if debug_info else None
             }
 
     except Exception as e:

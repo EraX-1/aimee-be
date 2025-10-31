@@ -84,7 +84,7 @@ class IntegratedLLMService:
                 # 管理者ノウハウ・判断基準を検索
                 manager_rules = self._chroma_service.search_manager_rules(
                     query_text=message,
-                    n_results=3
+                    n_results=5
                 )
                 rag_results["manager_rules"] = manager_rules
                 app_logger.info(f"管理者ルール検索完了: {len(manager_rules)}件")
@@ -168,8 +168,8 @@ class IntegratedLLMService:
                 app_logger.info(f"直前の提案を使用: {suggestion}")
             else:
                 app_logger.warning("直前の提案が見つかりません")
-        elif intent_type in ["completion_time_prediction", "delay_risk_detection", "cross_business_transfer", "process_optimization"]:
-            app_logger.info(f"Intent type '{intent_type}' は提案生成をスキップ")
+        elif intent_type in ["completion_time_prediction", "delay_risk_detection"]:
+            app_logger.info(f"Intent type '{intent_type}' は提案生成をスキップ（予測・検出のみ）")
         elif intent.get("requires_action") and (db_data or rag_results):
             suggestion = await self._generate_suggestion(intent, db_data, context, rag_results)
             if detail and suggestion:
@@ -182,14 +182,27 @@ class IntegratedLLMService:
 
         # ステップ5: 最終レスポンス生成（RAG結果も含める）
         response_context = self._prepare_response_context(intent, db_data, context, rag_results)
-        response_text = await self.ollama_service.generate_response(
-            message,
-            intent,
-            response_context,
-            db_data,
-            suggestion,
-            rag_results  # RAG検索結果を追加
-        )
+
+        # intent_typeに応じて応答を生成
+        intent_type = intent.get("intent_type")
+
+        # impact_analysis（影響分析）の場合は専用の応答
+        if intent_type == "impact_analysis":
+            response_text = self._generate_impact_analysis_response(suggestion)
+            app_logger.info(f"影響分析応答生成（LLMスキップ）")
+        # 提案がある場合はシンプル応答（LLMスキップで高速化）
+        elif suggestion and len(suggestion.get("changes", [])) > 0:
+            response_text = self._generate_simple_response(suggestion)
+            app_logger.info(f"シンプル応答生成（LLMスキップ）: {len(suggestion.get('changes', []))}件")
+        else:
+            response_text = await self.ollama_service.generate_response(
+                message,
+                intent,
+                response_context,
+                db_data,
+                suggestion,
+                rag_results  # RAG検索結果を追加
+            )
         
         # 回答タイプの分類
         response_type = self._classify_response_type(response_text)
@@ -225,8 +238,15 @@ class IntegratedLLMService:
         }
         
         if detail:
-            result["debug_info"] = debug_info
-        
+            # DebugInfoモデルのフィールド名に合わせてキーを変換
+            result["debug_info"] = {
+                "intent_analysis": debug_info.get("step1_intent_analysis"),
+                "database_queries": debug_info.get("step2_database_queries"),
+                "rag_results": debug_info.get("step2_rag_search"),
+                "processing_time": debug_info.get("processing_time", {}),
+                "skill_matching": debug_info.get("step4_suggestion_generation")
+            }
+
         return result
     
     async def _generate_suggestion(
@@ -244,6 +264,10 @@ class IntegratedLLMService:
         if intent_type == "delay_resolution":
             return await self._generate_delay_resolution_suggestion(intent, db_data, context)
         elif intent_type == "deadline_optimization":
+            return await self._generate_delay_resolution_suggestion(intent, db_data, context)
+        elif intent_type == "cross_business_transfer":
+            return await self._generate_delay_resolution_suggestion(intent, db_data, context)
+        elif intent_type == "process_optimization":
             return await self._generate_delay_resolution_suggestion(intent, db_data, context)
         elif intent_type == "resource_allocation":
             return await self._generate_resource_allocation_suggestion(intent, db_data, context)
@@ -283,6 +307,84 @@ class IntegratedLLMService:
 
         # 配置提案を構築
         changes = []
+
+        # 不足がない場合でも、deadline_optimization等では提案を生成
+        intent_type = intent.get("intent_type")
+        if len(shortage_list) == 0 and intent_type in ["deadline_optimization", "cross_business_transfer"]:
+            app_logger.info(f"不足なしだが、{intent_type}のため効率化提案を生成")
+
+            # 非SSのリソースを優先的に選ぶ（業務間移動）
+            non_ss_resources = [
+                r for r in available_resources
+                if r.get("business_category") not in ["SS", None]
+            ]
+
+            app_logger.info(f"非SSリソース: {len(non_ss_resources)}件")
+
+            # 工程別にグループ化
+            by_process = {}
+            for r in non_ss_resources:
+                proc = r.get("process_name", "不明")
+                if proc not in by_process:
+                    by_process[proc] = []
+                by_process[proc].append(r)
+
+            # 優先順位: エントリ1 > エントリ2 > 補正
+            priority_processes = ["エントリ1", "エントリ2", "補正", "SV補正"]
+            selected_operators_set = set()
+
+            for priority_proc in priority_processes:
+                if len(changes) >= 3:  # 最大3件
+                    break
+
+                if priority_proc not in by_process or len(by_process[priority_proc]) == 0:
+                    continue
+
+                resource = by_process[priority_proc][0]
+                process_name = resource.get("process_name")
+
+                # 該当工程のスキル保有者を取得
+                operators_by_target_skill = db_data.get("operators_by_target_skill", {})
+                skill_holders = operators_by_target_skill.get(process_name, [])
+
+                # オペレータを選定（ランダムに2人）
+                import random
+                operator_names = []
+                if len(skill_holders) > 0:
+                    # 移動元の業務カテゴリのオペレータを優先
+                    from_category = resource.get("business_category")
+                    from_ops = [
+                        op for op in skill_holders
+                        if op.get("current_business_category") == from_category
+                        and op.get("operator_name") not in selected_operators_set
+                    ]
+
+                    if len(from_ops) >= 2:
+                        random.shuffle(from_ops)
+                        selected = from_ops[:2]
+                        operator_names = [op.get("operator_name") for op in selected]
+                        for name in operator_names:
+                            selected_operators_set.add(name)
+
+                app_logger.info(f"オペレータ選定: {len(operator_names)}人（{process_name}）")
+
+                if len(operator_names) > 0:
+                    # 4階層形式で生成（非SS → SS）
+                    change = {
+                        "from_business_category": resource.get("business_category"),
+                        "from_business_name": resource.get("business_name"),
+                        "from_process_category": resource.get("process_category", "OCR対象"),
+                        "from_process_name": process_name,
+                        "to_business_category": "SS",
+                        "to_business_name": "新SS(W)",
+                        "to_process_category": resource.get("process_category", "OCR対象"),
+                        "to_process_name": process_name,
+                        "count": len(operator_names),
+                        "operators": operator_names,
+                        "is_cross_business": True
+                    }
+                    changes.append(change)
+                    app_logger.info(f"業務間移動提案: {resource.get('business_category')} → SS ({process_name}, {len(operator_names)}人: {operator_names})")
 
         # 不足している拠点・工程に対して、余剰がある拠点から配置
         for i, shortage in enumerate(shortage_list[:5]):  # 最大5件の不足に対応
@@ -508,3 +610,102 @@ class IntegratedLLMService:
             return "status_report"  # 状況報告
         else:
             return "general"  # 一般回答
+
+    def _generate_impact_analysis_response(self, suggestion: Dict[str, Any]) -> str:
+        """
+        影響分析の応答を生成（Q2対応）
+        """
+        # 直前の提案を確認
+        if suggestion and len(suggestion.get("changes", [])) > 0:
+            changes = suggestion.get("changes", [])
+            total_moved = sum(c.get("count", 0) for c in changes)
+
+            response_parts = [
+                "**移動元への影響分析**",
+                "",
+                f"直前の提案で合計{total_moved}人の移動を提案しています。",
+                "",
+                "【移動元の確認事項】"
+            ]
+
+            # ユニークな移動元を抽出
+            from_locations = set()
+            for c in changes:
+                from_cat = c.get("from_business_category", "")
+                from_name = c.get("from_business_name", "")
+                from_proc = c.get("from_process_name", "")
+                count = c.get("count", 0)
+                from_locations.add((from_cat, from_name, from_proc, count))
+
+            for i, (cat, name, proc, count) in enumerate(sorted(from_locations), 1):
+                response_parts.append(f"{i}. **{cat}**の「{name}」の「{proc}」")
+                response_parts.append(f"   移動人数: {count}人")
+                response_parts.append(f"   → 残りの人員で処理可能か確認が必要")
+                response_parts.append("")
+
+            response_parts.append("【推奨確認】")
+            response_parts.append("- 移動元の工程に十分な人員が残っているか")
+            response_parts.append("- 移動後も処理速度が維持できるか")
+            response_parts.append("- 特定のスキル保有者が偏っていないか")
+
+            return "\n".join(response_parts)
+        else:
+            # 直前の提案がない場合
+            return """**配置変更における移動元への影響確認ポイント**
+
+配置変更を実施する際は、以下の点を確認してください：
+
+【移動元工程の確認事項】
+1. 残存人員数
+   - 移動後も最低限の人員が確保できているか
+
+2. スキルバランス
+   - 熟練者と新人のバランスは適切か
+
+3. 処理速度への影響
+   - 移動後も納期に間に合う処理速度が維持できるか
+
+【推奨】
+具体的な配置変更を提案した後、この影響確認を行うことをお勧めします。"""
+
+    def _generate_simple_response(self, suggestion: Dict[str, Any]) -> str:
+        """
+        提案がある場合のシンプルな応答を生成（LLMスキップで高速化）
+        4階層形式に対応
+        """
+        changes = suggestion.get("changes", [])
+        total = sum(c.get("count", 0) for c in changes)
+
+        lines = [f"**配置変更を提案します**（合計{total}人）\n"]
+
+        for i, c in enumerate(changes[:5], 1):
+            # 4階層形式を優先、なければ旧形式
+            from_cat = c.get("from_business_category", "")
+            from_name = c.get("from_business_name", "")
+            from_proc = c.get("from_process_name", c.get("process", "不明"))
+            to_cat = c.get("to_business_category", "")
+            to_name = c.get("to_business_name", "")
+            to_proc = c.get("to_process_name", c.get("process", "不明"))
+            count = c.get("count", 0)
+            operators = c.get("operators", [])
+
+            # 4階層表示
+            if from_cat:
+                lines.append(f"{i}. **{from_cat}**の「{from_name}」の「{from_proc}」")
+                lines.append(f"   → **{to_cat}**の「{to_name}」の「{to_proc}」")
+                lines.append(f"   移動人数: {count}人")
+            else:
+                # 旧形式フォールバック
+                from_loc = c.get("from", "不明")
+                to_loc = c.get("to", "不明")
+                lines.append(f"{i}. {from_loc} → {to_loc} ({from_proc}, {count}人)")
+
+            if operators and len(operators) > 0:
+                lines.append(f"   オペレータ: {', '.join(operators[:3])}")
+
+            lines.append("")
+
+        if len(changes) > 5:
+            lines.append(f"（他{len(changes)-5}件の提案あり）")
+
+        return "\n".join(lines)
